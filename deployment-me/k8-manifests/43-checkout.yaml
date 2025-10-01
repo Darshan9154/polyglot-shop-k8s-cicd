@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: checkout
+  namespace: retail-store
+spec:
+  selector:
+    app: checkout
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout
+  namespace: retail-store
+  labels:
+    app: checkout
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: checkout
+  template:
+    metadata:
+      labels:
+        app: checkout
+    spec:
+      initContainers:
+        - name: wait-for-redis
+          image: redis:6.0-alpine
+          command: ["sh", "-c", "until redis-cli -h checkout-redis ping; do echo waiting for redis; sleep 3; done"]
+      containers:
+        - name: checkout
+          image: 517178430929.dkr.ecr.eu-north-1.amazonaws.com/checkout:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: RETAIL_CHECKOUT_PERSISTENCE_PROVIDER
+              value: redis
+            - name: RETAIL_CHECKOUT_PERSISTENCE_REDIS_URL
+              value: redis://checkout-redis:6379
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+      imagePullSecrets:
+        - name: ecr-secret

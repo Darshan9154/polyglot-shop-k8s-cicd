@@ -1,0 +1,88 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders
+  namespace: retail-store
+spec:
+  selector:
+    app: orders
+  ports:
+    - port: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orders
+  namespace: retail-store
+  labels:
+    app: orders
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: orders
+  template:
+    metadata:
+      labels:
+        app: orders
+    spec:
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16.1
+          command: ["sh", "-c", "until pg_isready -h orders-db -U postgres; do echo waiting for postgres; sleep 3; done"]
+        - name: wait-for-rabbitmq
+          image: busybox:1.36
+          command: ["sh", "-c", "until nc -z rabbitmq 5672; do echo waiting for rabbitmq; sleep 3; done"]
+      containers:
+        - name: orders
+          image: 517178430929.dkr.ecr.eu-north-1.amazonaws.com/orders:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: SERVER_TOMCAT_ACCESSLOG_ENABLED
+              value: "true"
+            - name: RETAIL_ORDERS_PERSISTENCE_PROVIDER
+              value: "postgres"
+            - name: RETAIL_ORDERS_PERSISTENCE_ENDPOINT
+              value: "orders-db:5432"
+            - name: RETAIL_ORDERS_PERSISTENCE_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_DB
+            - name: RETAIL_ORDERS_PERSISTENCE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_USER
+            - name: RETAIL_ORDERS_PERSISTENCE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: RETAIL_ORDERS_MESSAGING_PROVIDER
+              value: "rabbitmq"
+            - name: RETAIL_ORDERS_MESSAGING_RABBITMQ_ADDRESSES
+              value: "rabbitmq:5672"
+            - name: RETAIL_ORDERS_MESSAGING_RABBITMQ_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: RABBITMQ_DEFAULT_USER
+            - name: RETAIL_ORDERS_MESSAGING_RABBITMQ_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: rabbitmq-secret
+                  key: RABBITMQ_DEFAULT_PASS
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
