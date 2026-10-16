@@ -1,8 +1,8 @@
-# umbrella — installs all five application services in a single release.
+﻿# umbrella â€” installs all five application services in a single release.
 #
 # Why this exists: the five services are deployed together and versioned together, so a
 # single `helm upgrade` is more convenient than five. It is a convenience, not a
-# requirement — each service chart installs correctly on its own.
+# requirement â€” each service chart installs correctly on its own.
 #
 # Why the dependencies are declared with file:// paths rather than a chart repository:
 # this is one project's deployment, not a published platform. Pointing at a local path
@@ -18,7 +18,7 @@ name: umbrella
 description: |
   Installs the five Polyglot Shop application services (cart, catalog, checkout, orders,
   ui) as a single Helm release. The backing services are managed separately under
-  k8s/infra because they have a different lifecycle and hold state.
+  platform/charts/infra because they have a different lifecycle and hold state.
 type: application
 version: 0.1.0
 appVersion: "a785cf0"

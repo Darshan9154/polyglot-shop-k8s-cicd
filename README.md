@@ -1,3 +1,56 @@
+﻿<!--
+  Orientation note added by the DevOps work. It sits at the very top because a newcomer's first
+  question is "which parts of this repository are the sample application, and which were added to
+  deploy it?" Without this, the answer requires reading the whole tree.
+-->
+
+## Repository layout — read this first
+
+This repository has **two parts**, and the boundary is a directory listing:
+
+| Path | What it is | Origin |
+|---|---|---|
+| **`platform/`** | The deployment: Helm charts, Terraform, CI/CD, runbooks | **Added** |
+| `src/` | The application source: cart, catalog, checkout, orders, ui | Given |
+| `deployment-me/` | A Docker Compose deployment of the application | Given |
+| `docs/`, `scripts/`, `terraform/` | The sample application's own docs, scripts and examples | Given |
+| `.github/workflows/` | Two of the eight workflows are the CI/CD pipeline | Mixed |
+
+**Start with [`platform/README.md`](./platform/README.md).** It explains what exists, the install
+order, and which parts are production-grade versus deliberately sized down for a test cluster.
+
+### Inside `platform/`
+
+```
+platform/
+├── bootstrap/        Cluster-level objects applied once (namespaces, secrets, storage class)
+├── charts/           Helm charts
+│   ├── app/          The five services + umbrella
+│   ├── infra/        mariadb, postgresql, redis, rabbitmq, dynamodb-local
+│   ├── observability/ Prometheus stack config, OpenTelemetry, Jaeger, Loki
+│   └── tools/        Chart generators and validators
+├── terraform/        eks/ (the cluster) and build-server/ (the CI runner's host)
+├── scripts/          Operational scripts
+└── docs/             Step-by-step records, including every failure encountered
+```
+
+### The two workflows that are ours
+
+| Workflow | Purpose |
+|---|---|
+| `.github/workflows/build-and-push-ecr.yml` | Builds each service image, scans it, pushes to ECR |
+| `.github/workflows/deploy-eks.yml` | Renders the charts and deploys to the EKS cluster |
+
+Both run on a **self-hosted runner** hosted on the build server. That is not a preference: from
+inside the VPC the EKS API endpoint resolves to its private address, and the cluster's security
+group allows port 443 only from that machine. **No AWS credential is stored in this repository** —
+the runner uses the instance profile.
+
+The other six workflows under `.github/workflows/` belong to the sample application. Note that
+`Release` and `E2E Test` fail on `main`, including on the original commit — that is pre-existing
+and unrelated to the platform.
+
+---
 ![Banner](./docs/images/banner.png)
 
 <div align="center">
@@ -154,7 +207,7 @@ software packages (such as open source packages) at install-time or build-time
 or run-time ("External Dependencies"). The External Dependencies are subject to
 license terms that you must accept in order to use this package. If you do not
 accept all of the applicable license terms, you should not use this package. We
-recommend that you consult your company’s open source approval policy before
+recommend that you consult your companyâ€™s open source approval policy before
 proceeding.
 
 Provided below is a list of External Dependencies and the applicable license

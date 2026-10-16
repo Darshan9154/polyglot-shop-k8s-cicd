@@ -1,8 +1,8 @@
-# deploy-eks.yml — deploy the application charts to the EKS cluster.
+﻿# deploy-eks.yml â€” deploy the application charts to the EKS cluster.
 #
 # Where this runs
 #   A self-hosted GitHub Actions runner on the build server (EC2 i-06bae5ecefeb6eb90). This is
-#   not a preference — it is a requirement of how the cluster is reached:
+#   not a preference â€” it is a requirement of how the cluster is reached:
 #
 #     * From inside the VPC the EKS API endpoint resolves to its PRIVATE address, so the runner
 #       must BE in the VPC.
@@ -13,7 +13,7 @@
 #   was verified directly: from the build server before the security group rule existed,
 #   `kubectl get nodes` returned `dial tcp 172.31.36.96:443: i/o timeout`.
 #
-# Credentials — deliberately none stored
+# Credentials â€” deliberately none stored
 #   AWS authentication comes from the instance profile, so no access key exists in this
 #   repository, in its secrets, or on the runner.
 #
@@ -123,8 +123,8 @@ jobs:
           set -euo pipefail
           # Why --dry-run=server and not client: a server-side dry run is validated by the API
           # server against the real admission policies and CRDs, so it catches things a client
-          # render cannot — an unknown field, a PodSecurity violation, a missing CRD.
-          helm upgrade --install "${{ inputs.release }}" k8s/app/umbrella \
+          # render cannot â€” an unknown field, a PodSecurity violation, a missing CRD.
+          helm upgrade --install "${{ inputs.release }}" platform/charts/app/umbrella \
             --namespace "${{ inputs.namespace }}" \
             --set global.imageTag="${{ inputs.image_tag }}" \
             --dry-run=server
@@ -143,7 +143,7 @@ jobs:
           #
           # Why --wait: without it the step succeeds as soon as the objects are created, before
           # any pod is running, so a broken image would be reported as a successful deploy.
-          helm upgrade --install "${{ inputs.release }}" k8s/app/umbrella \
+          helm upgrade --install "${{ inputs.release }}" platform/charts/app/umbrella \
             --namespace "${{ inputs.namespace }}" \
             --set global.imageTag="${{ inputs.image_tag }}" \
             --wait \
@@ -174,4 +174,4 @@ jobs:
           echo "Rollback:"
           echo "  helm rollback ${{ inputs.release }} ${{ steps.before.outputs.previous_revision }} -n ${{ inputs.namespace }}"
           echo "Or, to pin the previous images without a Helm rollback:"
-          echo "  helm upgrade ${{ inputs.release }} k8s/app/umbrella -n ${{ inputs.namespace }} --reuse-values --set global.imageTag=<previous-sha>"
+          echo "  helm upgrade ${{ inputs.release }} platform/charts/app/umbrella -n ${{ inputs.namespace }} --reuse-values --set global.imageTag=<previous-sha>"

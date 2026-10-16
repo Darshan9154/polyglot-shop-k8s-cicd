@@ -1,4 +1,4 @@
-# Polyglot Shop — Kubernetes deployment (Helm, from scratch)
+﻿# Polyglot Shop â€” Kubernetes deployment (Helm, from scratch)
 
 Production-grade Helm charts and manifests for the Polyglot Shop application,
 written from the `deployment-me/docker-compose.yml` service definitions rather than
@@ -16,25 +16,25 @@ component, and the differences live in `values.yaml` where they are reviewable.
 
 ```
 k8s/
-├── app/                        # the five application services
-│   ├── cart/                   # Java  · DynamoDB (local)      · published 8082
-│   ├── catalog/                # Go    · MariaDB               · published 8081
-│   ├── orders/                 # Java  · PostgreSQL + RabbitMQ · published 8083
-│   ├── checkout/               # Node  · Redis                 · published 8085
-│   ├── ui/                     # Java  · aggregates the four   · published 8888
-│   └── umbrella/               # installs all five in one release
-├── infra/                      # the backing services
-│   ├── mariadb/                # catalog's relational store
-│   ├── postgresql/             # orders' relational store
-│   ├── redis/                  # checkout's session store
-│   ├── rabbitmq/               # orders' message broker
-│   └── dynamodb-local/         # cart's key-value store
-├── observability/              # metrics, logs, traces
-│   ├── kube-prometheus-stack/  # Prometheus + Grafana + alerting
-│   ├── opentelemetry-collector/
-│   ├── jaeger/
-│   └── loki/
-└── bootstrap/                  # namespace, secrets, storage, policies
+â”œâ”€â”€ app/                        # the five application services
+â”‚   â”œâ”€â”€ cart/                   # Java  Â· DynamoDB (local)      Â· published 8082
+â”‚   â”œâ”€â”€ catalog/                # Go    Â· MariaDB               Â· published 8081
+â”‚   â”œâ”€â”€ orders/                 # Java  Â· PostgreSQL + RabbitMQ Â· published 8083
+â”‚   â”œâ”€â”€ checkout/               # Node  Â· Redis                 Â· published 8085
+â”‚   â”œâ”€â”€ ui/                     # Java  Â· aggregates the four   Â· published 8888
+â”‚   â””â”€â”€ umbrella/               # installs all five in one release
+â”œâ”€â”€ infra/                      # the backing services
+â”‚   â”œâ”€â”€ mariadb/                # catalog's relational store
+â”‚   â”œâ”€â”€ postgresql/             # orders' relational store
+â”‚   â”œâ”€â”€ redis/                  # checkout's session store
+â”‚   â”œâ”€â”€ rabbitmq/               # orders' message broker
+â”‚   â””â”€â”€ dynamodb-local/         # cart's key-value store
+â”œâ”€â”€ observability/              # metrics, logs, traces
+â”‚   â”œâ”€â”€ kube-prometheus-stack/  # Prometheus + Grafana + alerting
+â”‚   â”œâ”€â”€ opentelemetry-collector/
+â”‚   â”œâ”€â”€ jaeger/
+â”‚   â””â”€â”€ loki/
+â””â”€â”€ bootstrap/                  # namespace, secrets, storage, policies
 ```
 
 ## Why the application and its dependencies are separate charts
@@ -136,13 +136,13 @@ Verified totals: **14 charts, 117 files, 74 template files**.
 Run the whole sweep with:
 
 ```bash
-k8s/tools/validate-all.sh          # lint, render, schema-validate, consistency check
+platform/charts/tools/validate-all.sh          # lint, render, schema-validate, consistency check
 ```
 
 Three real bugs were found by this process and fixed, none of which `helm lint` alone
 would have caught:
 
-1. Every egress rule had `ports` nested inside a `to` peer. The schema forbids this —
+1. Every egress rule had `ports` nested inside a `to` peer. The schema forbids this â€”
    `ports` is a sibling of `to`. `helm lint` passed while the objects were invalid.
 2. The chart generators wrote files in the platform's default encoding, so non-ASCII
    characters broke chart parsing with `invalid leading UTF-8 octet`.

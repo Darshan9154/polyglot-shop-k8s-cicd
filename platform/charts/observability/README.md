@@ -1,4 +1,4 @@
-# Observability stack
+﻿# Observability stack
 
 Metrics, logs and traces for the Polyglot Shop deployment, plus the rules that turn them
 into alerts.
@@ -12,54 +12,54 @@ into alerts.
 | **Alertmanager** | alert routing | Without it, the Prometheus rules evaluate and fire into nothing. |
 | **OpenTelemetry Collector** | trace ingest and fan-out | Applications hold one endpoint; the backend can change without redeploying any service. Also the place to batch and cap memory, which is what keeps trace volume affordable. |
 | **Jaeger** | trace storage and UI | Spans crossing five services are the only practical way to answer "why is this page slow" or "where did this request fail". |
-| **Loki** | log aggregation | Indexes labels rather than full text, so it is far cheaper in memory and disk than ELK — the deciding factor on a two-node cluster with a fixed budget. |
+| **Loki** | log aggregation | Indexes labels rather than full text, so it is far cheaper in memory and disk than ELK â€” the deciding factor on a two-node cluster with a fixed budget. |
 
 ## Data flow
 
 ```
-application pods ──OTLP (4317/4318)──► OpenTelemetry Collector ──OTLP──► Jaeger
-                 ──/actuator/prometheus, /metrics──► Prometheus (scraped)
-                 ──stdout logs──► Loki
+application pods â”€â”€OTLP (4317/4318)â”€â”€â–º OpenTelemetry Collector â”€â”€OTLPâ”€â”€â–º Jaeger
+                 â”€â”€/actuator/prometheus, /metricsâ”€â”€â–º Prometheus (scraped)
+                 â”€â”€stdout logsâ”€â”€â–º Loki
 
-Grafana ──► Prometheus   (metrics)
-        ──► Loki         (logs, with trace_id linked to Jaeger)
-        ──► Jaeger       (traces)
+Grafana â”€â”€â–º Prometheus   (metrics)
+        â”€â”€â–º Loki         (logs, with trace_id linked to Jaeger)
+        â”€â”€â–º Jaeger       (traces)
 ```
 
-The link that matters most is **Loki → Jaeger**: a `trace_id` in a log line becomes a
+The link that matters most is **Loki â†’ Jaeger**: a `trace_id` in a log line becomes a
 clickable jump to the full trace. It is configured as a derived field in the Grafana
-datasource, and it is why the Jaeger datasource has a fixed `uid` — an auto-generated uid
+datasource, and it is why the Jaeger datasource has a fixed `uid` â€” an auto-generated uid
 would break the link on the next reload.
 
 ## Install
 
 ```bash
 # 1. The namespace and its NetworkPolicies come from bootstrap
-kubectl apply -f k8s/bootstrap/
+kubectl apply -f platform/bootstrap/
 
 # 2. Prometheus, Grafana, Alertmanager (upstream chart, configured by our values)
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
 helm repo update
 helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
   --namespace monitoring \
-  --values k8s/observability/kube-prometheus-stack/values-small-cluster.yaml \
+  --values platform/charts/observability/kube-prometheus-stack/values-small-cluster.yaml \
   --wait --timeout 15m
 
 # 3. Traces: collector, then backend
-helm upgrade --install otel-collector k8s/observability/opentelemetry-collector -n monitoring
-helm upgrade --install jaeger         k8s/observability/jaeger                  -n monitoring
+helm upgrade --install otel-collector platform/charts/observability/opentelemetry-collector -n monitoring
+helm upgrade --install jaeger         platform/charts/observability/jaeger                  -n monitoring
 
 # 4. Logs
-helm upgrade --install loki k8s/observability/loki -n monitoring
+helm upgrade --install loki platform/charts/observability/loki -n monitoring
 
 # 5. Wire Prometheus to the application, and load the alert rules
-kubectl apply -f k8s/observability/kube-prometheus-stack/servicemonitors.yaml
-kubectl apply -f k8s/observability/kube-prometheus-stack/rules.yaml
+kubectl apply -f platform/charts/observability/kube-prometheus-stack/servicemonitors.yaml
+kubectl apply -f platform/charts/observability/kube-prometheus-stack/rules.yaml
 ```
 
 ## Reaching the UIs
 
-Neither Grafana nor Jaeger is exposed outside the cluster by default, which is deliberate —
+Neither Grafana nor Jaeger is exposed outside the cluster by default, which is deliberate â€”
 both would otherwise be reachable without authentication. Use a port-forward:
 
 ```bash
@@ -80,10 +80,10 @@ kubectl -n monitoring get secret monitoring-grafana \
 `rules.yaml` adds four groups on top of the chart's defaults, because the defaults cover
 cluster-level problems and know nothing about this application's dependencies:
 
-- **availability** — unavailable replicas, crash looping, failing readiness probes
-- **resources** — OOMKilled, CPU throttling
-- **persistence** — persistent volumes below 15% free
-- **observability** — the collector dropping spans or its export queue filling
+- **availability** â€” unavailable replicas, crash looping, failing readiness probes
+- **resources** â€” OOMKilled, CPU throttling
+- **persistence** â€” persistent volumes below 15% free
+- **observability** â€” the collector dropping spans or its export queue filling
 
 Every rule carries a `for` duration so an ordinary rollout does not notify anyone, and each
 annotation states what the alert means plus the first command to run. An alert name alone
@@ -96,7 +96,7 @@ PagerDuty endpoint. Add one before relying on alerts to reach anyone.
 ## Deliberate compromises
 
 These are recorded rather than hidden. Each is a sizing or cost tradeoff, not a
-correctness one — no probe, policy or security setting was weakened.
+correctness one â€” no probe, policy or security setting was weakened.
 
 | Setting | Value | Why |
 |---|---|---|
@@ -123,7 +123,7 @@ A KSM-based alternative for the volume check, which needs no kubelet access:
 
 ```
 kubelet_volume_stats_available_bytes ... < 0.15
-  →  kube_persistentvolumeclaim_status_phase{phase="Lost"} == 1
+  â†’  kube_persistentvolumeclaim_status_phase{phase="Lost"} == 1
 ```
 
 Neither is a reason to delay the deploy; both are things to look at once the cluster is up.

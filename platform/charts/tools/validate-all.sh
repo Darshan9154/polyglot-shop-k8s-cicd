@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿#!/bin/bash
 # validate-all.sh - lint every chart, render it, and schema-validate every plain manifest.
 #
 # Why the full sweep rather than per-chart checks: a NetworkPolicy in one namespace can be
@@ -6,7 +6,7 @@
 # infrastructure chart is not visible in either chart alone. Running everything together is
 # what makes those cross-cutting mistakes visible.
 set -uo pipefail
-K8S_DIR=/opt/polyglot-shop/k8s
+K8S_DIR=/opt/polyglot-shop/platform/charts
 WORK=/tmp/all-validation
 rm -rf "${WORK}" && mkdir -p "${WORK}"
 
@@ -17,7 +17,7 @@ LINT_FAIL=0
 VALID_FAIL=0
 
 echo "=================================================="
-echo "1. helm lint — every chart"
+echo "1. helm lint â€” every chart"
 echo "=================================================="
 for c in ${APP_CHARTS}; do
   if helm lint "${K8S_DIR}/app/${c}" >/dev/null 2>&1; then
@@ -49,7 +49,7 @@ done
 
 echo
 echo "=================================================="
-echo "2. helm template + kubeconform — rendered manifests"
+echo "2. helm template + kubeconform â€” rendered manifests"
 echo "=================================================="
 validate() {
   local label="$1" chartpath="$2"
@@ -90,7 +90,7 @@ fi
 
 echo
 echo "=================================================="
-echo "3. plain manifests — bootstrap and observability extras"
+echo "3. plain manifests â€” bootstrap and observability extras"
 echo "=================================================="
 for f in "${K8S_DIR}"/bootstrap/*.yaml \
          "${K8S_DIR}"/observability/kube-prometheus-stack/servicemonitors.yaml \

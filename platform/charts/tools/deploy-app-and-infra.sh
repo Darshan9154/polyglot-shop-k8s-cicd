@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿#!/bin/bash
 # deploy-app-and-infra.sh - deploy the application and its backing services to EKS.
 #
 # Why the application and infrastructure deploy before the observability stack: the worker
@@ -12,7 +12,7 @@
 # added afterwards where there is room.
 set -uo pipefail
 
-K8S_DIR=/opt/polyglot-shop/k8s
+K8S_DIR=/opt/polyglot-shop/platform/charts
 CTX="${KUBE_CONTEXT:-}"
 NS_APP=retail-store
 NS_DATA=data
@@ -20,7 +20,7 @@ NS_DATA=data
 log() { echo; echo "=== $* ==="; }
 
 log "1. bootstrap: namespaces, secret, default-deny NetworkPolicies"
-kubectl apply -f "${K8S_DIR}/bootstrap/" 2>&1 | tail -n 12
+kubectl apply -f "$(dirname "${K8S_DIR}")/bootstrap/" 2>&1 | tail -n 12
 
 log "2. verify the namespaces exist before deploying into them"
 kubectl get ns "${NS_APP}" "${NS_DATA}" --no-headers 2>&1

@@ -1,7 +1,7 @@
-#!/bin/bash
+﻿#!/bin/bash
 # run-validation.sh - render each chart and validate the rendered manifests.
 set -uo pipefail
-K8S_DIR=/opt/polyglot-shop/k8s
+K8S_DIR=/opt/polyglot-shop/platform/charts
 for c in cart catalog orders checkout ui; do
   echo "--- ${c} ---"
   if helm template "${c}" "${K8S_DIR}/app/${c}" > "/tmp/v-${c}.yaml" 2>"/tmp/v-${c}.err"; then
