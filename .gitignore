@@ -1,4 +1,4 @@
-.DS_Store
+﻿.DS_Store
 *.tfvars
 .terraform
 *.tfstate*
@@ -31,3 +31,7 @@ devenv.local.nix
 .direnv
 
 .pre-commit-config.yaml
+# Scratch files built for AWS SSM commands. They hold base64-encoded script bodies and, in at
+# least one case, a runner registration token. Never commit them.
+.ssm-params.json
+*ssm-params*.json

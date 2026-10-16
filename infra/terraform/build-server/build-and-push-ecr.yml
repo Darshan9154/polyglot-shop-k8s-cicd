@@ -1,0 +1,211 @@
+# build-and-push-ecr.yml — build every service image and push it to Amazon ECR.
+#
+# Where this runs
+#   A self-hosted GitHub Actions runner installed on the project build server
+#   (EC2 i-06bae5ecefeb6eb90). That runner already has Docker, Trivy, and the
+#   compilers this repository needs, so no build tooling is downloaded per run.
+#
+# Credentials — deliberately none stored
+#   AWS authentication comes from the EC2 instance profile
+#   (retail-store-build-server-role), read from the instance metadata service.
+#   No AWS access key exists in this repository, in its secrets, or on the runner.
+#   The role holds only AmazonEC2ContainerRegistryPowerUser plus SSM core.
+#
+# SECURITY WARNING — read before enabling
+#   This repository is PUBLIC. GitHub's own guidance is that self-hosted runners
+#   should not be used with public repositories, because a fork or pull request can
+#   execute code on the runner. The runner is on an instance whose role can push to
+#   ECR. Mitigations applied here:
+#     * `pull_request` is NOT a trigger, so forks do not run automatically.
+#     * Workflows require manual approval for first-time external contributors.
+#   If this repository is ever made private, or the runner is shared with other
+#   repositories, revisit this decision.
+
+name: build-and-push-ecr
+
+on:
+  # Why manual first: the pipeline is proven on demand before it runs on every push.
+  workflow_dispatch:
+    inputs:
+      push_latest:
+        description: "Also tag and push :latest (set false for strict immutability)"
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+
+# Why minimal permissions: the pipeline pushes images to ECR, not commits to the
+# repository, so it needs to read contents and nothing more.
+permissions:
+  contents: read
+
+# Why a concurrency group: two runs pushing the same SHA tag at once would race.
+concurrency:
+  group: build-push-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-north-1
+  # Why a literal registry host: ECR is account-scoped and the account is known.
+  ECR_REGISTRY: 536882095289.dkr.ecr.eu-north-1.amazonaws.com
+  # Why a prefix: keeps this project's repositories separate from anything else.
+  ECR_PREFIX: polyglot-shop
+  # Why the commit SHA: every image traces back to the exact code that built it.
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  build-and-push:
+    name: build, scan (advisory), push
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 90
+
+    strategy:
+      # Why no fail-fast: one service failing should not hide the state of the others.
+      fail-fast: false
+      matrix:
+        include:
+          - service: cart
+            context: src/cart
+          - service: catalog
+            context: src/catalog
+          - service: checkout
+            context: src/checkout
+          - service: orders
+            context: src/orders
+          - service: ui
+            context: src/ui
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          # Why: the images are built from the exact commit that triggered the run.
+          fetch-depth: 1
+
+      - name: Confirm the toolchain is present
+        run: |
+          set -euo pipefail
+          docker --version
+          docker compose version
+          trivy --version
+          aws --version
+
+      - name: Confirm AWS identity comes from the instance role
+        run: |
+          set -euo pipefail
+          # Why print only the ARN: it proves the identity without exposing anything
+          # sensitive. No credentials are stored anywhere for this to work.
+          aws sts get-caller-identity --region "${AWS_REGION}" --query Arn --output text
+
+      - name: Verify the ECR repository exists
+        run: |
+          set -euo pipefail
+          repo="${ECR_PREFIX}/${{ matrix.service }}"
+          # Why this only verifies and does not create: the instance role carries
+          # AmazonEC2ContainerRegistryPowerUser, which deliberately excludes
+          # ecr:CreateRepository. Creating repositories here failed with
+          # AccessDeniedException, so repository creation is an out-of-band step
+          # performed once (see docs/step-5-ecr-push.md). Failing fast with a clear
+          # message beats a confusing AccessDeniedException later in the run.
+          if aws ecr describe-repositories --region "${AWS_REGION}" \
+               --repository-names "${repo}" >/dev/null 2>&1; then
+            echo "repository ${repo} exists"
+          else
+            echo "::error::ECR repository ${repo} does not exist."
+            echo "Create it once with ecr:CreateRepository (the instance role cannot):"
+            echo "  aws ecr create-repository --region ${AWS_REGION} \\"
+            echo "    --repository-name ${repo} \\"
+            echo "    --image-scanning-configuration scanOnPush=true"
+            exit 1
+          fi
+
+      - name: Build the image
+        run: |
+          set -euo pipefail
+          image="${ECR_REGISTRY}/${ECR_PREFIX}/${{ matrix.service }}:${IMAGE_TAG}"
+          # Why the repository's own Dockerfile: this project builds its images that
+          # way, and the build context paths come from deployment-me/docker-compose.yml.
+          docker build -t "${image}" "${{ matrix.context }}"
+          echo "BUILT=${image}" >> "${GITHUB_ENV}"
+
+      - name: Scan the image (advisory — does not block the push)
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          report="trivy-${{ matrix.service }}.json"
+          # Why advisory: this repository's findings are recorded and time-boxed as
+          # explicit exceptions rather than silently ignored. See docs/step-4-security-scanning.md.
+          # Why --ignore-unfixed: an unfixed CVE offers no patch, so it is recorded
+          # in the report instead of failing the run.
+          trivy image \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --format json \
+            --output "${report}" \
+            "${BUILT}" || echo "Trivy reported findings; recorded in ${report}"
+          # Why a readable summary too: JSON is for the artifact, this is for the log.
+          trivy image --severity HIGH,CRITICAL --ignore-unfixed --format table "${BUILT}" || true
+          echo "SCAN_REPORT=${report}" >> "${GITHUB_ENV}"
+
+      - name: Log in to ECR
+        run: |
+          set -euo pipefail
+          # Why get-login-password from the instance role: short-lived credentials
+          # obtained per run, never a stored key.
+          aws ecr get-login-password --region "${AWS_REGION}" \
+            | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+
+      - name: Push the image
+        run: |
+          set -euo pipefail
+          docker push "${BUILT}"
+          if [ "${{ inputs.push_latest }}" != "false" ]; then
+            # Why a human tag as well as the SHA: easy to find in the console, while
+            # the SHA remains the value any deployment should reference.
+            docker tag "${BUILT}" "${ECR_REGISTRY}/${ECR_PREFIX}/${{ matrix.service }}:latest"
+            docker push "${ECR_REGISTRY}/${ECR_PREFIX}/${{ matrix.service }}:latest"
+          fi
+
+      - name: Record the pushed digest
+        run: |
+          set -euo pipefail
+          # Why the digest: a tag can be moved; the digest identifies the exact bytes.
+          # A later deploy should reference the digest, not the tag.
+          digest="$(aws ecr describe-images \
+            --region "${AWS_REGION}" \
+            --repository-name "${ECR_PREFIX}/${{ matrix.service }}" \
+            --image-ids imageTag="${IMAGE_TAG}" \
+            --query 'imageDetails[0].imageDigest' --output text)"
+          echo "${ECR_PREFIX}/${{ matrix.service }}@${digest}" >> digests.txt
+          echo "::notice title=${{ matrix.service }}::${{ matrix.service }} pushed as ${IMAGE_TAG} digest ${digest}"
+
+      - name: Upload scan report and digest list
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scan-and-digests-${{ matrix.service }}
+          path: |
+            trivy-${{ matrix.service }}.json
+            digests.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # Why a separate job: it runs once, after every service has been pushed, and
+  # summarises what a deployment would consume.
+  summary:
+    name: summary
+    needs: build-and-push
+    if: always()
+    runs-on: [self-hosted, linux, x64]
+    steps:
+      - name: Report the outcome
+        run: |
+          set -euo pipefail
+          echo "build-and-push result: ${{ needs.build-and-push.result }}"
+          if [ "${{ needs.build-and-push.result }}" != "success" ]; then
+            echo "One or more services did not push. Check the failed matrix entries."
+            exit 1
+          fi
+          echo "All service images were built and pushed to ECR."

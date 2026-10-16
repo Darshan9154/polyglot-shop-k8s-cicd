@@ -1,0 +1,7 @@
+
+Error: waiting for EKS Node Group (polyglot-shop-dev:polyglot-shop-dev-nodes) create: operation error EKS: DescribeNodegroup, get identity: get credentials: failed to refresh cached credentials, save token: open C:\Users\darsh\.aws\login\cache\059f42fc126b5c704713f7f4faa58359d075d3c18b9da1a9b7f196225241d3e7.json: Access is denied.
+
+  with aws_eks_node_group.this,
+  on main.tf line 170, in resource "aws_eks_node_group" "this":
+ 170: resource "aws_eks_node_group" "this" {
+

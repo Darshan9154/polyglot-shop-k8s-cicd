@@ -1,0 +1,14 @@
+
+Error: creating EKS Access Entry (polyglot-shop-dev:arn:aws:iam::536882095289:user/devops-agent): operation error EKS: CreateAccessEntry, https response error StatusCode: 409, RequestID: f26ef7be-52fd-4fea-b555-6aa6c3250df4, ResourceInUseException: The specified access entry resource is already in use on this cluster.
+
+  with aws_eks_access_entry.admin,
+  on main.tf line 117, in resource "aws_eks_access_entry" "admin":
+ 117: resource "aws_eks_access_entry" "admin" {
+
+
+Error: creating EKS Node Group (polyglot-shop-dev:polyglot-shop-dev-nodes): operation error EKS: CreateNodegroup, https response error StatusCode: 400, RequestID: 559c3654-7974-4d3a-b9a8-fc2537a47ea2, InvalidParameterException: [t4g.small] is not a valid instance type for requested amiType AL2_x86_64
+
+  with aws_eks_node_group.this,
+  on main.tf line 161, in resource "aws_eks_node_group" "this":
+ 161: resource "aws_eks_node_group" "this" {
+

@@ -1,0 +1,286 @@
+#!/bin/bash
+# bootstrap.sh.tftpl - installs every tool the pipeline needs, once, on first boot.
+#
+# Why a template: the repository to clone is configurable in Terraform, so the
+# four values at the top are filled in at plan time.
+#
+# Reading this file: Terraform renders a doubled dollar before a shell variable
+# into a single dollar in the copy that runs on the instance. That doubling is
+# what stops Terraform from resolving the shell's own variables and command
+# substitutions while it renders.
+#
+# Why set -euo pipefail: stop at the first failure, treat an unset variable as
+# an error, and fail a pipeline if any command in it fails. A half-installed
+# server then shows up loudly in the boot log instead of quietly at build time.
+set -euo pipefail
+
+# Why noninteractive: cloud-init has no keyboard, so any package prompt would
+# hang the boot forever.
+export DEBIAN_FRONTEND=noninteractive
+
+export PROJECT_NAME='${project_name}'
+export REPOSITORY_URL='${repository_url}'
+export REPOSITORY_REF='${repository_ref}'
+export REPOSITORY_DIR='${repository_dir}'
+
+# Everything below is logged, so /var/log/cloud-init-output.log is the single
+# place to look when the boot misbehaves.
+echo "==> Bootstrap starting for $${PROJECT_NAME} at $(date -Is)"
+
+## ---------------------------------------------------------------------------
+## Base packages
+## ---------------------------------------------------------------------------
+# Why update first: the AMI's package lists can be days old, and a stale list is
+# the most common cause of "package not found" during a first boot.
+apt-get update -y
+apt-get install -y --no-install-recommends \
+  ca-certificates \
+  curl \
+  gnupg \
+  jq \
+  lsb-release \
+  unzip \
+  wget
+
+## ---------------------------------------------------------------------------
+## Docker Engine and the Compose plugin
+## ---------------------------------------------------------------------------
+# Why Docker's own repository and not Ubuntu's docker.io: the distribution
+# package lags behind and cannot guarantee the Compose v2 plugin, which the
+# local Compose test in Step 5 relies on.
+install -m 0755 -d /etc/apt/keyrings
+
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+
+UBUNTU_SUITE="$(. /etc/os-release && echo "$${UBUNTU_CODENAME:-$$VERSION_CODENAME}")"
+OS_ARCH="$(dpkg --print-architecture)"
+
+# Why a .sources file: the older one-line list format is deprecated on current
+# Ubuntu releases, and this is the form Docker's own installation guide uses.
+tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $${UBUNTU_SUITE}
+Components: stable
+Architectures: $${OS_ARCH}
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+
+apt-get update -y
+apt-get install -y --no-install-recommends \
+  containerd.io \
+  docker-buildx-plugin \
+  docker-ce \
+  docker-ce-cli \
+  docker-compose-plugin
+
+# Why add the default user to the docker group: without this every docker
+# command needs sudo, and the pipeline scripts should not have to know that.
+usermod -aG docker ubuntu
+
+# Why enable and start explicitly: on a fresh cloud image the daemon may not be
+# enabled yet when the first build runs.
+systemctl enable --now docker
+
+## ---------------------------------------------------------------------------
+## AWS CLI v2
+## ---------------------------------------------------------------------------
+# Why v2 and not the apt package: the distribution ships AWS CLI v1, which lacks
+# current features and is in maintenance. v2 is the supported client today.
+case "$${OS_ARCH}" in
+  amd64) AWS_CLI_ZIP="awscli-exe-linux-x86_64.zip" ;;
+  arm64) AWS_CLI_ZIP="awscli-exe-linux-aarch64.zip" ;;
+  *)
+    echo "ERROR: unsupported architecture for AWS CLI v2: $${OS_ARCH}" >&2
+    exit 1
+    ;;
+esac
+
+TMP_AWS="$(mktemp -d)"
+curl -fsSL "https://awscli.amazonaws.com/$${AWS_CLI_ZIP}" -o "$${TMP_AWS}/awscliv2.zip"
+unzip -q "$${TMP_AWS}/awscliv2.zip" -d "$${TMP_AWS}"
+"$${TMP_AWS}/aws/install" --update
+rm -rf "$${TMP_AWS}"
+
+## ---------------------------------------------------------------------------
+## kubectl
+## ---------------------------------------------------------------------------
+# Why fetch the stable version marker first: it keeps this script from pinning a
+# version that is no longer served. The binary is installed with fixed owner and
+# mode so it behaves the same on every rebuild.
+KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
+curl -fsSL "https://dl.k8s.io/release/$${KUBECTL_VERSION}/bin/linux/$${OS_ARCH}/kubectl" -o /tmp/kubectl
+install -o root -g root -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+rm -f /tmp/kubectl
+
+## ---------------------------------------------------------------------------
+## Helm
+## ---------------------------------------------------------------------------
+# Why a temporary copy and not `curl | bash`: the script can then be inspected
+# in the log, and a download failure becomes a normal error instead of a
+# half-run pipeline.
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4 -o /tmp/get_helm.sh
+chmod 700 /tmp/get_helm.sh
+/tmp/get_helm.sh
+rm -f /tmp/get_helm.sh
+
+## ---------------------------------------------------------------------------
+## eksctl
+## ---------------------------------------------------------------------------
+# Why the checksum dance: eksctl publishes a checksums file next to each release,
+# and the later EKS step depends on this binary. A corrupt download discovered at
+# cluster-creation time would be far more expensive to debug.
+#
+# Why the backup copy: the checksum file is deleted at the end of this block, so
+# the retry inside the function needs its own copy that survives the first pass.
+#
+# Why two platform spellings: the release asset is published as
+# eksctl_Linux_<arch>.tar.gz with a capital L, while the AWS CLI architecture
+# name from dpkg is lowercase amd64. Both are tried against the checksum file so
+# the check works whichever spelling the release uses.
+# Why the literal asset name: eksctl publishes the release asset with a capital
+# Linux and the AWS architecture name (amd64 or arm64), not the lowercase uname
+# spelling. The checksum below still verifies the exact bytes, so a wrong or
+# substituted file fails the install instead of being trusted.
+EKSCTL_TMP="$(mktemp -d)"
+EKSCTL_TARBALL="eksctl_Linux_$${OS_ARCH}.tar.gz"
+
+install_eksctl() {
+  curl -fsSL "https://github.com/eksctl-io/eksctl/releases/latest/download/$${EKSCTL_TARBALL}" -o "$${EKSCTL_TMP}/$${EKSCTL_TARBALL}"
+  if [ ! -f "$${EKSCTL_TMP}/eksctl_checksums.txt" ]; then
+    curl -fsSL "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_checksums.txt" -o "$${EKSCTL_TMP}/eksctl_checksums.txt"
+  fi
+  # Why take the first matching line: eksctl's checksum file lists more than one
+  # entry for the same asset name (the tarball plus a .sbom.json), so an
+  # unfiltered capture would concatenate two digests and always mismatch.
+  CHECK_LINE="$(grep -F "$${EKSCTL_TARBALL}" "$${EKSCTL_TMP}/eksctl_checksums.txt" | head -n 1 || true)"
+  if [ -z "$${CHECK_LINE}" ]; then
+    echo "ERROR: no checksum line found for $${EKSCTL_TARBALL}" >&2
+    return 1
+  fi
+  # Why pass the checksum explicitly: sha256sum needs the filename it is checking.
+  # Reading checksums from a pipe makes it read standard input and fail with "no
+  # properly formatted SHA256 checksum lines found".
+  ACTUAL="$(sha256sum "$${EKSCTL_TMP}/$${EKSCTL_TARBALL}" | awk '{print $1}')"
+  EXPECTED="$(echo "$${CHECK_LINE}" | awk '{print $1}')"
+  if [ "$${ACTUAL}" != "$${EXPECTED}" ]; then
+    echo "ERROR: eksctl checksum mismatch" >&2
+    return 1
+  fi
+  tar -xzf "$${EKSCTL_TMP}/$${EKSCTL_TARBALL}" -C "$${EKSCTL_TMP}"
+  install -o root -g root -m 0755 "$${EKSCTL_TMP}/eksctl" /usr/local/bin/eksctl
+  return 0
+}
+
+# Why retry once: release assets and CDNs occasionally return a truncated file.
+# One retry turns that into a non-event; a second failure is recorded rather than
+# killing the rest of the bootstrap.
+if ! install_eksctl; then
+  echo "WARN: eksctl install failed on first attempt; retrying once" >&2
+  if ! install_eksctl; then
+    echo "ERROR: eksctl install failed twice; continuing with the rest of the bootstrap" >&2
+    EKSCTL_INSTALLED=false
+  else
+    EKSCTL_INSTALLED=true
+  fi
+else
+  EKSCTL_INSTALLED=true
+fi
+rm -rf "$${EKSCTL_TMP}"
+
+## ---------------------------------------------------------------------------
+## Terraform
+## ---------------------------------------------------------------------------
+# Why HashiCorp's official apt repository: it brings the current release and
+# keeps it updatable, instead of downloading a single zip whose version goes
+# stale the moment this script is not edited.
+HASHICORP_SUITE="$(grep -oP '(?<=UBUNTU_CODENAME=).*' /etc/os-release || lsb_release -cs)"
+wget -qO- https://apt.releases.hashicorp.com/gpg \
+  | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+echo "deb [arch=$${OS_ARCH} signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $${HASHICORP_SUITE} main" \
+  | tee /etc/apt/sources.list.d/hashicorp.list >/dev/null
+apt-get update -y
+apt-get install -y --no-install-recommends terraform
+
+## ---------------------------------------------------------------------------
+## Trivy
+## ---------------------------------------------------------------------------
+# Why Trivy's own apt repository: it is the install path the Trivy project
+# documents for Debian and Ubuntu, so updates arrive with the rest of the system.
+wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
+  | gpg --dearmor | tee /usr/share/keyrings/trivy.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" \
+  | tee /etc/apt/sources.list.d/trivy.list >/dev/null
+apt-get update -y
+apt-get install -y --no-install-recommends trivy
+
+## ---------------------------------------------------------------------------
+## Checkov
+## ---------------------------------------------------------------------------
+# Why pipx: Checkov is a Python application, and current Ubuntu releases mark the
+# system Python as externally managed. pipx gives it an isolated environment and
+# puts the command on PATH, which a plain system-wide pip install does not.
+apt-get install -y --no-install-recommends pipx
+pipx ensurepath
+# Why export PATH here: cloud-init runs as root, but pipx installs commands into
+# the user-local bin directory, and the rest of this script (and any later shell)
+# must be able to find checkov.
+export PATH="$PATH:/root/.local/bin:/home/ubuntu/.local/bin"
+if ! pipx install checkov; then
+  # Why a fallback at all: some images ship an older pipx without every
+  # subcommand. A plain pip install is the documented fallback, and it is still
+  # logged so the reason is visible.
+  echo "WARN: pipx install failed; falling back to pip3 install checkov" >&2
+  pip3 install --break-system-packages checkov
+fi
+
+## ---------------------------------------------------------------------------
+## AWS Systems Manager agent
+## ---------------------------------------------------------------------------
+# Why check instead of install blindly: Ubuntu Server AMIs published by AWS
+# usually ship the agent already. Installing again would start a second copy and
+# produce confusing duplicate registrations. If it is missing, the vendor's
+# documented snap package is used.
+if ! snap list amazon-ssm-agent >/dev/null 2>&1; then
+  snap install amazon-ssm-agent --classic
+  snap start amazon-ssm-agent
+fi
+
+## ---------------------------------------------------------------------------
+## Source repository
+## ---------------------------------------------------------------------------
+# Why a shallow clone: the pipeline needs the code, not the project's full
+# history, and a shallow clone is much faster on a small instance.
+mkdir -p "$(dirname "$${REPOSITORY_DIR}")"
+if [ -d "$${REPOSITORY_DIR}/.git" ]; then
+  # Why re-fetch instead of skipping: a rebuilt server must not silently keep an
+  # old checkout.
+  git -C "$${REPOSITORY_DIR}" fetch --depth 1 origin
+else
+  git clone --depth 1 "$${REPOSITORY_URL}" "$${REPOSITORY_DIR}"
+fi
+
+if [ -n "$${REPOSITORY_REF}" ]; then
+  git -C "$${REPOSITORY_DIR}" fetch --depth 1 origin "$${REPOSITORY_REF}"
+  git -C "$${REPOSITORY_DIR}" checkout --detach FETCH_HEAD
+fi
+
+# Why: the source store is public, so no credential is stored on the instance.
+git -C "$${REPOSITORY_DIR}" remote set-url origin "$${REPOSITORY_URL}"
+chown -R ubuntu:ubuntu "$${REPOSITORY_DIR}"
+
+## ---------------------------------------------------------------------------
+## Readiness marker
+## ---------------------------------------------------------------------------
+# Why a file: the pipeline and a person can both check one thing to know the
+# installation finished, instead of guessing from package lists.
+{
+  echo "bootstrap_complete=$(date -Is)"
+  echo "project=$${PROJECT_NAME}"
+  echo "repository=$${REPOSITORY_URL}"
+  echo "repository_dir=$${REPOSITORY_DIR}"
+} > /var/lib/retail-store-bootstrap.status
+
+echo "==> Bootstrap finished"

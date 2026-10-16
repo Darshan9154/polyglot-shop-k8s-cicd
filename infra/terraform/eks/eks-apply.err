@@ -1,0 +1,14 @@
+
+Error: creating EKS Access Entry (polyglot-shop-dev:arn:aws:iam::536882095289:user/devops-agent): operation error EKS: CreateAccessEntry, https response error StatusCode: 400, RequestID: c64a08ac-dc60-4791-a26e-3ac6062b1cfd, InvalidRequestException: The cluster's authentication mode must be set to one of [API, API_AND_CONFIG_MAP] to perform this operation.
+
+  with aws_eks_access_entry.admin,
+  on main.tf line 99, in resource "aws_eks_access_entry" "admin":
+  99: resource "aws_eks_access_entry" "admin" {
+
+
+Error: creating EKS Access Entry (polyglot-shop-dev:arn:aws:iam::536882095289:role/polyglot-shop-dev-eks-node): operation error EKS: CreateAccessEntry, https response error StatusCode: 400, RequestID: bd800823-1ba9-4817-b820-02416b877c09, InvalidRequestException: The cluster's authentication mode must be set to one of [API, API_AND_CONFIG_MAP] to perform this operation.
+
+  with aws_eks_access_entry.node,
+  on main.tf line 128, in resource "aws_eks_access_entry" "node":
+ 128: resource "aws_eks_access_entry" "node" {
+

@@ -1,0 +1,177 @@
+# deploy-eks.yml — deploy the application charts to the EKS cluster.
+#
+# Where this runs
+#   A self-hosted GitHub Actions runner on the build server (EC2 i-06bae5ecefeb6eb90). This is
+#   not a preference — it is a requirement of how the cluster is reached:
+#
+#     * From inside the VPC the EKS API endpoint resolves to its PRIVATE address, so the runner
+#       must BE in the VPC.
+#     * The cluster security group allows port 443 only from the build server's security group.
+#     * The build server's instance role holds the EKS access entry.
+#
+#   A GitHub-hosted runner would fail at the first kubectl call with a connection timeout. That
+#   was verified directly: from the build server before the security group rule existed,
+#   `kubectl get nodes` returned `dial tcp 172.31.36.96:443: i/o timeout`.
+#
+# Credentials — deliberately none stored
+#   AWS authentication comes from the instance profile, so no access key exists in this
+#   repository, in its secrets, or on the runner.
+#
+# Why this workflow is separate from the image build:
+#   Building an image and deploying it have different failure modes and different blast radii.
+#   A failed build is harmless; a failed deploy can leave a cluster in a partial state. Keeping
+#   them separate means a deployment can be re-run without rebuilding, and a build can be
+#   re-run without touching a cluster. It also means the deploy has its own concurrency group,
+#   so two deployments cannot interleave.
+
+name: deploy-eks
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy (the git SHA pushed by build-and-push-ecr)"
+        type: string
+        required: true
+      namespace:
+        description: "Namespace to deploy into"
+        type: string
+        default: retail-store
+      release:
+        description: "Helm release name"
+        type: string
+        default: shop
+      dry_run:
+        description: "Render only, do not apply"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Why a concurrency group that does not cancel: cancelling a Helm upgrade midway can leave a
+# release in a pending state. Queuing is the correct behaviour for a deploy.
+concurrency:
+  group: deploy-eks-${{ inputs.namespace }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-north-1
+  CLUSTER_NAME: polyglot-shop-dev
+  ECR_REGISTRY: 536882095289.dkr.ecr.eu-north-1.amazonaws.com
+  ECR_PREFIX: polyglot-shop
+
+jobs:
+  deploy:
+    name: helm upgrade ${{ inputs.release }}
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Confirm the toolchain
+        run: |
+          set -euo pipefail
+          helm version --short
+          kubectl version --client
+
+      - name: Confirm the AWS identity is the instance role
+        run: |
+          set -euo pipefail
+          # Why print only the ARN: it proves the identity without exposing anything. No
+          # credential is stored anywhere for this to work.
+          aws sts get-caller-identity --region "${AWS_REGION}" --query Arn --output text
+
+      - name: Configure kubectl for the cluster
+        run: |
+          set -euo pipefail
+          # Why a token-based kubeconfig: it means the deploy step authenticates the same way a
+          # human does, through the access entry, rather than through a kubeconfig file that
+          # would have to be stored as a secret and rotated.
+          aws eks update-kubeconfig \
+            --region "${AWS_REGION}" \
+            --name "${CLUSTER_NAME}"
+
+      - name: Verify cluster connectivity before changing anything
+        run: |
+          set -euo pipefail
+          # Why this step exists on its own: a connectivity failure here is a network or
+          # permissions problem, and it is much easier to read as its own failed step than as
+          # the reason a Helm upgrade timed out.
+          kubectl get nodes -o custom-columns='NAME:.metadata.name,STATUS:.status.conditions[-1].type'
+          kubectl -n "${{ inputs.namespace }}" get deployment --no-headers || true
+
+      - name: Record the current release revision as the rollback handle
+        id: before
+        run: |
+          set -uo pipefail
+          rev="$(helm --kube-context "$(kubectl config current-context)" \
+            -n "${{ inputs.namespace }}" get metadata "${{ inputs.release }}" \
+            -o json 2>/dev/null | grep -o '"version":[0-9]*' | head -n1 | cut -d: -f2 || true)"
+          # Why this is captured and printed: it is the value to pass to `helm rollback` if the
+          # upgrade goes wrong. Capturing it after the fact is not possible, because a failed
+          # upgrade may itself create a revision.
+          echo "previous_revision=${rev:-none}" | tee -a "$GITHUB_OUTPUT"
+          echo "::notice title=Rollback handle::helm rollback ${{ inputs.release }} ${rev:-?} -n ${{ inputs.namespace }}"
+
+      - name: Render the charts
+        run: |
+          set -euo pipefail
+          # Why --dry-run=server and not client: a server-side dry run is validated by the API
+          # server against the real admission policies and CRDs, so it catches things a client
+          # render cannot — an unknown field, a PodSecurity violation, a missing CRD.
+          helm upgrade --install "${{ inputs.release }}" k8s/app/umbrella \
+            --namespace "${{ inputs.namespace }}" \
+            --set global.imageTag="${{ inputs.image_tag }}" \
+            --dry-run=server
+
+      - name: Stop here if this is a dry run
+        if: ${{ inputs.dry_run }}
+        run: echo "dry_run was set; the render above is the only output."
+
+      - name: Deploy
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          # Why --rollback-on-failure: if the release does not become ready within the timeout,
+          # Helm returns the release to its previous revision rather than leaving a half-applied
+          # state. This is Helm 4's name for what `--atomic` did in Helm 3.
+          #
+          # Why --wait: without it the step succeeds as soon as the objects are created, before
+          # any pod is running, so a broken image would be reported as a successful deploy.
+          helm upgrade --install "${{ inputs.release }}" k8s/app/umbrella \
+            --namespace "${{ inputs.namespace }}" \
+            --set global.imageTag="${{ inputs.image_tag }}" \
+            --wait \
+            --rollback-on-failure \
+            --timeout 10m
+
+      - name: Verify the rollout
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          kubectl -n "${{ inputs.namespace }}" get deployment,pods
+          for d in $(kubectl -n "${{ inputs.namespace }}" get deployment -o name); do
+            # Why a rollout status per deployment: this is the check that turns "the objects
+            # exist" into "the pods are actually serving". A deployment can exist with zero
+            # available replicas and still look present in `get deployment`.
+            kubectl -n "${{ inputs.namespace }}" rollout status "$d" --timeout=180s
+          done
+
+      - name: Report what was deployed, and how to undo it
+        if: always()
+        run: |
+          set -uo pipefail
+          echo "release      : ${{ inputs.release }}"
+          echo "namespace    : ${{ inputs.namespace }}"
+          echo "image tag    : ${{ inputs.image_tag }}"
+          echo "previous rev : ${{ steps.before.outputs.previous_revision }}"
+          echo
+          echo "Rollback:"
+          echo "  helm rollback ${{ inputs.release }} ${{ steps.before.outputs.previous_revision }} -n ${{ inputs.namespace }}"
+          echo "Or, to pin the previous images without a Helm rollback:"
+          echo "  helm upgrade ${{ inputs.release }} k8s/app/umbrella -n ${{ inputs.namespace }} --reuse-values --set global.imageTag=<previous-sha>"
