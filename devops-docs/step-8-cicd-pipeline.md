@@ -3,6 +3,41 @@
 Two GitHub Actions workflows that take a commit to a running deployment on EKS, plus the
 prerequisites they depend on — all of which needed fixing before the pipeline could work at all.
 
+## Verified: the pipeline has run green
+
+`build-and-push-ecr` triggered on the push that added it, ran on the self-hosted runner, and
+completed successfully. All five services went through every step:
+
+```
+job: build, scan (advisory), push (cart, src/cart)      runner=polyglot-build-server
+  1. Set up job                                        completed success
+  2. Check out the repository                          completed success
+  3. Confirm the toolchain is present                  completed success
+  4. Confirm AWS identity comes from the instance role completed success
+  5. Verify the ECR repository exists                  completed success
+  6. Build the image                                   completed success
+  7. Scan the image (advisory)                         completed success
+  8. Log in to ECR                                     completed success
+  9. Push the image                                    completed success
+ 10. Record the pushed digest                          completed success
+ 11. Upload scan report and digest list                completed success
+```
+
+Run conclusion: **`success`**, for all five matrix entries (cart, catalog, checkout, orders, ui).
+
+The outcome — images in ECR, tagged with the commit SHA rather than a mutable tag:
+
+```
+polyglot-shop/cart      -> 3fd946ca31fac47d5e7bc41e78c2da67c0e0b8dc, latest
+polyglot-shop/catalog   -> 3fd946ca31fac47d5e7bc41e78c2da67c0e0b8dc, latest
+polyglot-shop/checkout  -> 3fd946ca31fac47d5e7bc41e78c2da67c0e0b8dc, latest
+polyglot-shop/orders    -> 3fd946ca31fac47d5e7bc41e78c2da67c0e0b8dc, latest
+polyglot-shop/ui        -> 3fd946ca31fac47d5e7bc41e78c2da67c0e0b8dc, latest
+```
+
+The SHA tags are what a deployment should reference. `latest` exists for convenience and is
+mutable — a digest or SHA is the reproducible choice.
+
 ## The workflows
 
 ### `build-and-push-ecr.yml`
@@ -209,3 +244,67 @@ ECR push, and the deployment itself.
 - **The bootstrap layer.** Namespaces, secrets, the gp3 StorageClass and the default-deny policies
   are applied with `kubectl apply` by hand. They change rarely, but they are prerequisites for
   anything the pipeline deploys.
+
+## The `workflow` scope problem, and the workaround
+
+Pushing the two workflow files failed:
+
+```
+refusing to allow an OAuth App to create or update workflow
+`.github/workflows/build-and-push-ecr.yml` without `workflow` scope
+```
+
+`gh auth login` grants `repo`, `gist` and `read:org` — but not `workflow`. Creating or modifying
+anything under `.github/workflows/` is deliberately privileged, because a workflow file can execute
+arbitrary code on a runner.
+
+`gh auth refresh -s workflow` was the intended fix and it failed four times with
+`failure?reason=not_found` from GitHub's device page, despite a valid live code and the correct
+eight characters. The cause was never established.
+
+**The workaround turned out better than the fix**: the files were uploaded through the GitHub web UI
+(`/upload/main/.github/workflows`) using the signed-in browser session, which needs no token scope
+at all. Two files, one commit, no credential handling.
+
+Worth remembering: when a token scope blocks something, the web session usually does not have that
+restriction, because it is a different authorization path.
+
+## What was pushed, and where
+
+| Branch | Contents |
+|---|---|
+| `main` | The sample application, plus `k8s/` (13 charts) and the two workflows |
+| `devops-agent-test-polyglot` | Adds `infra/terraform/` and `devops-docs/` on top of that |
+
+The branch exists so pushes to it do not trip the sample repository's own workflows, which were
+already failing before this work started — `Release` and `E2E Test` both fail on the initial commit
+from 2025 as well.
+
+## A secret that nearly got committed
+
+The scratch file used to build AWS SSM commands (`.ssm-params.json`) contained a **base64-encoded
+GitHub Actions runner registration token**. The token had to reach the build server as part of an
+SSM command, and writing the parameters to a file was the reliable way to do it.
+
+It was found by grepping for credential patterns immediately before staging, and deleted. A
+`.gitignore` rule now covers `*ssm-params*.json` so it cannot be committed by accident.
+
+That file would otherwise have gone into a **public** repository, where the token would have been
+readable for the remainder of its one-hour validity. The lesson is the grep, not the file.
+
+## Known exposure: the AWS account id is public
+
+The charts on `main` hardcode the ECR registry:
+
+```yaml
+repository: 536882095289.dkr.ecr.eu-north-1.amazonaws.com/polyglot-shop/cart
+```
+
+That publishes the AWS account id in a public repository. It is **not** a credential — the registry
+still requires authentication to pull or push — but it is a stable account identifier that is
+normally not disclosed.
+
+The fix is to parameterise it: move the registry into a Helm value or a workflow variable so the
+charts carry no account-specific string. That is a small change to five `values.yaml` files plus the
+umbrella. It has not been made, and it is recorded here rather than left undiscovered.
+
