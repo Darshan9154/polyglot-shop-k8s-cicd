@@ -1,0 +1,191 @@
+﻿# cart values â€” defaults for a small test cluster, with the production alternative
+# recorded next to each compromise so the change is discoverable.
+
+# Why 1 replica by default: the target cluster has two worker nodes. Three replicas
+# of every service would not fit, and spreading three pods over two nodes is not
+# real availability anyway. Set to 3 on a properly sized cluster.
+replicaCount: 1
+
+image:
+  # Why the full registry path: the cluster pulls from ECR in the same account. The
+  # node instance role grants read access, so no imagePullSecret is required. If the
+  # images move to a private registry elsewhere, set imagePullSecrets below.
+  repository: 536882095289.dkr.ecr.eu-north-1.amazonaws.com/polyglot-shop/cart
+  # Why an explicit tag and never ":latest": a deployment that references a mutable
+  # tag cannot be reproduced. Pin the digest instead once the pipeline records one:
+  #   digest: "sha256:20c3453b2efce49f77d1ef4555b1192937f9135caee82ec859e5b3c7c0e811b7"
+  tag: "a785cf0"
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Why port 8080 and not the published 8082: inside the cluster each service listens
+# on its own port and is addressed by Service name. The Compose host-port mapping
+# (8082:8080) exists only because everything shared one machine; on Kubernetes it is
+# the Service that gives each one a stable address.
+containerPort: 8080
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+# Why these come from the Compose service definition verbatim: they are the
+# application's own configuration contract, and inventing different values would
+# change behaviour rather than just packaging.
+config:
+  SERVER_TOMCAT_ACCESSLOG_ENABLED: "true"
+  RETAIL_CART_PERSISTENCE_PROVIDER: "dynamodb"
+  # Why the in-cluster service name: DynamoDB Local runs in the data namespace, so
+  # the address must be fully qualified. A short name would only resolve within the
+  # same namespace.
+  RETAIL_CART_PERSISTENCE_DYNAMODB_ENDPOINT: "http://dynamodb.data.svc.cluster.local:8000"
+  RETAIL_CART_PERSISTENCE_DYNAMODB_CREATE_TABLE: "true"
+
+# Why AWS credentials are still present but dummy: DynamoDB Local does not validate
+# them, but the AWS SDK refuses to initialise without them. They are NOT real
+# credentials and grant nothing. If this is ever pointed at real DynamoDB, replace
+# this with IRSA (IAM Roles for Service Accounts) and remove them entirely.
+dummyAwsCredentials:
+  enabled: true
+  accessKeyId: "key"
+  secretAccessKey: "dummy"
+
+# Why explicit requests and limits: requests decide what the scheduler reserves and
+# the limits cap the blast radius of a runaway JVM. The JVM heap must also be told,
+# otherwise it sizes its heap from the node's total memory rather than the
+# container limit â€” the JAVA_OPTS below is what makes the limit meaningful.
+resources:
+  requests:
+    cpu: 100m
+    memory: 384Mi
+  limits:
+    cpu: 500m
+    memory: 768Mi
+
+jvm:
+  # Why percentage-based: it adapts to the limit above instead of hardcoding a heap
+  # that becomes wrong when the limit changes.
+  javaOpts: "-XX:MaxRAMPercentage=75.0 -Dotel.java.global-autoconfigure.enabled=true -Djava.security.egd=file:/dev/urandom"
+
+# Probes are taken from the Compose healthcheck. The startup probe exists because a
+# JVM service can take tens of seconds to answer; without it the liveness probe
+# would kill the container during a slow start and cause a restart loop.
+probes:
+  startup:
+    enabled: true
+    path: /actuator/health
+    failureThreshold: 30
+    periodSeconds: 5
+  liveness:
+    enabled: true
+    path: /actuator/health
+    initialDelaySeconds: 20
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    enabled: true
+    path: /actuator/health
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+# Why a writable /tmp on an otherwise read-only root: the Compose service ran with
+# read_only: true and a tmpfs at /tmp, so this preserves the same posture. Tomcat
+# and the JVM need a writable temp directory.
+tmpfs:
+  enabled: true
+  sizeLimit: 128Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  # Why 1000: the image creates its user with uid 1000. Running as an arbitrary
+  # numeric uid is allowed but this keeps parity with the image's own user.
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+    # Why NET_BIND_SERVICE is kept from the Compose definition: it permits binding a
+    # port below 1024. The service listens on 8080 and does not need it, so it is a
+    # no-op today; it is retained so the posture matches the tested configuration
+    # rather than silently differing.
+    add:
+      - NET_BIND_SERVICE
+
+# Why a PodDisruptionBudget at 1 replica: maxUnavailable is calculated as a
+# percentage, and a budget with no allowance blocks node drains entirely. With one
+# replica the honest setting is minAvailable: 0 until the replica count is raised.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 0
+
+# Why a NetworkPolicy per service: the bootstrap default-deny stops all ingress, so
+# each service must declare who may call it and what it may call.
+networkPolicy:
+  enabled: true
+  # Ingress: the UI aggregates cart calls, and readiness probes come from the kubelet.
+  #
+  # Why the component label carries the "shop-" release prefix: this must match the value the
+  # ui chart applies to its pods. The fullname helper produces "<release>-<chart>", so the
+  # label is shop-ui. Using "ui" here selects no pod, which blocks the only legitimate caller.
+  allowIngressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: retail-store
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/component: shop-ui
+  # Egress: DynamoDB Local, and DNS.
+  allowEgressTo:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: data
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/component: dynamodb
+      ports:
+        - protocol: TCP
+          port: 8000
+
+# Observability. The application already emits Prometheus metrics and OTLP traces
+# (they are present in the upstream sample), so these two settings are all that is
+# needed to make them visible; nothing has to be instrumented here.
+observability:
+  metrics:
+    enabled: true
+    path: /actuator/prometheus
+    port: 8080
+  tracing:
+    enabled: true
+    otlpEndpoint: "http://otel-collector.monitoring.svc.cluster.local:4317"
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+# Why no pod anti-affinity by default: with one replica it is meaningless, and with
+# two nodes a hard anti-affinity rule can leave a pod Pending forever. Enable it
+# together with replicaCount > 1.
+topologySpreadConstraints: []
+
+# HorizontalPodAutoscaler.
+#
+# Why disabled: the target cluster has two worker nodes with fixed capacity, so
+# scaling up would only produce Pending pods. It is configured here rather than
+# omitted so enabling it on a larger cluster is a values change, not a rewrite.
+# When enabling it, leave replicaCount in place as the initial value.
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 75
+  targetMemoryUtilizationPercentage: 80

@@ -1,0 +1,104 @@
+{{/*
+Loki configuration.
+
+Why the schema date matters and is not a placeholder: Loki refuses to start without a
+schema_config whose `from` date is on or before today, because the schema version defines
+how chunks are written. A date in the future is the most common first-start failure for a
+hand-written Loki config, and it fails with a parsing error that does not mention dates.
+The filesystem and boltdb-shipper schema below is the current recommendation for a
+single-binary deployment.
+
+Why structured metadata and TSDB are used rather than the older boltdb-shipper only: this
+is the current schema for Loki 3.x. Using an older schema on a new version is how a
+deployment works today and breaks on the next upgrade.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "loki.fullname" . }}-config
+  labels:
+    {{- include "loki.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    auth_enabled: false
+
+    server:
+      http_listen_port: {{ .Values.service.ports.http }}
+      grpc_listen_port: {{ .Values.service.ports.grpc }}
+      # Why the log level: debug would flood the collector with Loki's own logs on a small
+      # cluster, which is self-defeating for a logging backend.
+      log_level: info
+
+    common:
+      # Why instance_addr and ring are configured in single-binary mode: Loki still forms
+      # a ring internally, and leaving it unset makes it try to resolve the pod's own
+      # address in ways that fail on some CNI configurations.
+      instance_addr: 127.0.0.1
+      path_prefix: /loki
+      storage:
+        filesystem:
+          chunks_directory: /loki/chunks
+          rules_directory: /loki/rules
+      replication_factor: 1
+      ring:
+        kvstore:
+          store: inmemory
+
+    schema_config:
+      configs:
+        - from: 2024-01-01
+          store: tsdb
+          object_store: filesystem
+          schema: v13
+          index:
+            prefix: index_
+            period: 24h
+
+    limits_config:
+      # Why ingestion limits are imposed here as well as in values: the values set the
+      # container's expectations, but Loki enforces its own limits from this file. Both are
+      # set so a change to one is not silently ineffective.
+      ingestion_rate_mb: {{ .Values.limits.ingestionRateMB }}
+      ingestion_burst_size_mb: {{ .Values.limits.ingestionBurstMB }}
+      max_streams_per_user: {{ .Values.limits.maxStreamsPerUser }}
+      # Why `ingestion_rate_strategy` and not `ingestion_burst_size_policy`:
+      #
+      # The first version of this file used `ingestion_burst_size_policy`, which does not exist.
+      # Loki refused to start with
+      #
+      #   failed parsing config: yaml: unmarshal errors:
+      #     line 44: field ingestion_burst_size_policy not found in type validation.plain
+      #
+      # The correct key is `ingestion_rate_strategy`. It accepts two values:
+      #   global        over-limit requests are rejected with 429 and the sender retries
+      #   local         limiting is per-tenant rather than per-instance
+      #
+      # Why rate limiting rather than dropping lines: drop discards the logs that explain an
+      # incident, which is the opposite of what a logging backend is for. Rejecting with 429
+      # applies back pressure and the sender retries.
+      ingestion_rate_strategy: global
+      retention_period: {{ .Values.retention.days }}d
+      # Why this is required for retention to work at all: Loki refuses to delete anything
+      # unless deletion is explicitly enabled, so retention silently does nothing without it
+      # and the volume fills up.
+      allow_structured_metadata: true
+      volume_enabled: true
+
+    compactor:
+      working_directory: /loki/compactor
+      # Why the compactor is configured even in single-binary mode: it is the component
+      # that actually enforces retention by deleting expired chunks.
+      retention_enabled: {{ .Values.retention.enabled }}
+      delete_request_store: filesystem
+      compaction_interval: 10m
+
+    querier:
+      # Why a limit on the querier: an unbounded query over many days can exhaust memory
+      # and take down the whole Loki process.
+      max_concurrent: 4
+
+    # Why this block exists: without it, Loki writes its own logs to stdout in the same
+    # stream as application logs when collected by node-level agents, which makes Loki's
+    # logs indistinguishable from the logs it is aggregating.
+    analytics:
+      reporting_enabled: false

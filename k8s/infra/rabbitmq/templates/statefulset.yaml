@@ -1,0 +1,144 @@
+{{/*
+rabbitmq StatefulSet.
+
+Why StatefulSet and not Deployment: this service owns its data and needs a stable
+identity. The StatefulSet gives the pod a predictable name and its own
+PersistentVolumeClaim, so the data follows the pod across reschedules. A Deployment
+with a shared volume would lose data the first time the pod moved to another node.
+
+Why the volumeClaimTemplate and not a bare PVC: the template lets the StatefulSet own
+the claim's lifecycle, so the claim is created with the pod and is not deleted when
+the pod is removed.
+*/}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "rabbitmq.fullname" . }}
+  labels:
+    {{ include "rabbitmq.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "rabbitmq.headless" . }}
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{ include "rabbitmq.selectorLabels" . | nindent 6 }}
+  # Why OnDelete: an automatic rollout of a database can leave a partially migrated
+  # volume. OnDelete makes the restart an explicit operator action.
+  updateStrategy:
+    type: OnDelete
+  template:
+    metadata:
+      labels:
+        {{ include "rabbitmq.labels" . | nindent 8 }}
+    spec:
+      securityContext:
+        {{ toYaml .Values.podSecurityContext | nindent 8 }}
+      # Why 60 seconds: a database needs time to flush and close its files cleanly
+      # after SIGTERM. The default 30s can cut that short and force recovery on the
+      # next start, which is exactly the failure a stateful service must avoid.
+      terminationGracePeriodSeconds: 60
+      initContainers:
+        # Why this exists: see the note above. The cookie must be owner-readable only, and the
+        # image's own creation of it is widened by fsGroup.
+        - name: fix-erlang-cookie
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          # Why an explicit shell: the file's mode is the whole point, and there is no
+          # kubectl-level equivalent that survives a restart of the pod.
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              COOKIE=/var/lib/rabbitmq/.erlang.cookie
+              if [ ! -f "$COOKIE" ]; then
+                # Why a generated value rather than a fixed one: each RabbitMQ instance should
+                # have its own cookie. Allowing nodes to authenticate to a predictable shared
+                # value would be a weakness if the broker were ever clustered.
+                head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$COOKIE"
+              fi
+              chmod 0400 "$COOKIE"
+              echo "cookie mode: $(stat -c '%a %U' "$COOKIE")"
+          # Why the data volume is mounted here: the cookie lives inside the data directory,
+          # which is where the main container expects it.
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rabbitmq
+      containers:
+        - name: rabbitmq
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{ toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: amqp
+              containerPort: 5672
+              protocol: TCP
+            - name: management
+              containerPort: 15672
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "rabbitmq.fullname" . }}
+          env:
+            # Why valueFrom: the credential lives in a Secret and is never
+            # part of the chart, the values file or the rendered manifest.
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: polyglot-secrets
+                  key: DB_PASSWORD
+          {{ if .Values.startupProbe.enabled }}
+          # Why a startup probe: first-time initialisation of an empty volume is far
+          # slower than a normal start. Without this the liveness probe kills the
+          # process mid-initialisation and leaves a half-written volume.
+          startupProbe:
+            exec:
+              command:
+                - 'rabbitmq-diagnostics'
+                - '-q'
+                - 'ping'
+            timeoutSeconds: 15
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+          {{ end }}
+          livenessProbe:
+            tcpSocket:
+              port: amqp
+            timeoutSeconds: 15
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 5
+          readinessProbe:
+            exec:
+              command:
+                - 'rabbitmq-diagnostics'
+                - '-q'
+                - 'ping'
+            timeoutSeconds: 15
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 5
+          resources:
+            {{ toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/rabbitmq
+  {{ if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{ include "rabbitmq.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{ if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass }}
+        {{ end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{ end }}

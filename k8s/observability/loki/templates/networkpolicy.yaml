@@ -1,0 +1,53 @@
+{{- if .Values.networkPolicy.enabled }}
+# Traffic rules for Loki.
+#
+# Why the application namespace may push: every service emits logs, so restricting the
+# senders individually would mean updating this policy whenever a service is added. Log
+# lines are a lower-risk input than span payloads, so namespace-wide ingest is a
+# deliberate tradeoff recorded here rather than a silent default.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "loki.fullname" . }}
+  labels:
+    {{- include "loki.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "loki.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Why `from` and `ports` are siblings: `ports` belongs to the rule, not to the peer.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.allowIngressFromNamespace }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.ports.http }}
+    {{- if .Values.networkPolicy.allowIngressFromGrafana }}
+    # Why monitoring is also allowed: Grafana queries Loki for log panels, and Prometheus
+    # scrapes Loki's own metrics through the same HTTP port.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.ports.http }}
+    {{- end }}
+  egress:
+    # Why only DNS: with filesystem storage Loki reaches no external service. Anything more
+    # would be an unnecessary path out of a component that accepts untrusted input.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}

@@ -1,0 +1,109 @@
+# OpenTelemetry Collector values.
+#
+# The pipeline below is traces-only on purpose. Metrics are scraped directly from each
+# service by Prometheus, and logs go to Loki through the collector's filelog receiver.
+# Routing traces through the collector is what matters here, because the application
+# emits OTLP and needs a translator to reach Jaeger.
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+  # Why -contrib and not the core collector: the core distribution omits the Jaeger exporter and
+  # many receivers. The image is larger, and in exchange the pipeline does not need to be rebuilt
+  # from source when a component is added.
+  #
+  # Why this exact tag and not a guess: an earlier version of this file said 0.115.0, which does
+  # not exist. The pod failed with
+  #
+  #   failed to resolve reference "docker.io/otel/opentelemetry-collector-contrib:0.115.0": not found
+  #
+  # and then ImagePullBackOff. Collector versions are published frequently and no version is
+  # "obvious"; the tag here was read from the registry's tag list, not assumed. 0.162.0 is the
+  # newest stable release — the 0.163.0 tags are nightly builds and are deliberately avoided.
+  tag: "0.162.0"
+  pullPolicy: IfNotPresent
+
+# Why one replica: two collectors would both forward every span, so traces would be
+# duplicated in Jaeger with no way to tell which copy is real. A real deployment scales
+# this out only after adding a load-balancing exporter in front.
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  ports:
+    # Why each port is named: the Service port name is what Prometheus service discovery
+    # and the NetworkPolicy reference, and the OTLP receiver defaults depend on it.
+    otlp-grpc: 4317
+    otlp-http: 4318
+    metrics: 8888
+    health: 13133
+
+# Why an alias service: the application charts export OTLP to
+# "otel-collector.monitoring.svc.cluster.local:4317", which is the short name. The Helm fullname
+# helper names the real Service "otel-collector-opentelemetry-collector", so the short name does
+# not resolve and every span is silently dropped. This provides the name the applications use.
+serviceAlias: otel-collector
+
+# Where traces go. Jaeger is addressed by its in-cluster Service name.
+backends:
+  jaeger:
+    enabled: true
+    # Why 4317 (gRPC) and not 14250: this is Jaeger's OTLP-native receiver, which
+    # avoids a deprecated translation path.
+    endpoint: "jaeger-collector.monitoring.svc.cluster.local:4317"
+  debug:
+    # Why a debug exporter is available but off: turning it on prints every span, which
+    # is invaluable when traces are not arriving and unusable in normal operation.
+    enabled: false
+    verbosity: basic
+
+# Why the batch processor values are explicit: a collector that forwards spans one at a
+# time generates one request per span and will overwhelm a small Jaeger. Batching is
+# what makes trace ingest affordable on a two-node cluster.
+batch:
+  timeout: 5s
+  sendBatchSize: 512
+  sendBatchMaxSize: 1024
+
+# Why memory_limiter is the first processor in the pipeline: without it, a burst of
+# spans grows the collector until the kernel kills it, taking traces down entirely. The
+# limit makes the collector shed load instead of dying.
+memoryLimiter:
+  checkInterval: 1s
+  limitMiB: 400
+  spikeLimitMiB: 100
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  # Why true, unlike the databases: the collector writes nothing outside its
+  # configuration and an in-memory queue. It is one of the few images where a read-only
+  # root is genuinely satisfiable.
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+networkPolicy:
+  enabled: true
+  # Why the application namespace is the only permitted sender: the collector accepts
+  # span data, which is untrusted input. Restricting the source keeps anything outside
+  # the application from injecting or flooding traces.
+  allowIngressFromNamespace: retail-store
+  # Why egress is limited to Jaeger and DNS: the collector should reach exactly one
+  # backend. Anything else is a path for data exfiltration from a pod that processes
+  # application payloads.
+  allowEgressToJaeger: true

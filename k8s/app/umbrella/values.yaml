@@ -1,0 +1,44 @@
+# umbrella values — one place to set what every service shares.
+#
+# Why values are nested under each subchart's name: Helm passes the block named after
+# the dependency to that subchart. Anything set here overrides that subchart's own
+# values.yaml, which is how a release-wide change (a new image tag, a different
+# environment) is made once instead of five times.
+#
+# Why the block below is almost empty: the individual charts already carry correct
+# defaults, and repeating them here would create two places to change and guarantee
+# they diverge. Only genuinely release-wide settings belong here.
+
+# Release-wide values consumed by every subchart's template.
+# Why a single tag everywhere: the five images are built from one commit, so a release
+# is described by one value. Bumping this is what deploys a new version.
+global:
+  imageTag: "a785cf0"
+  environment: "dev"
+
+# Per-service overrides. Only the settings that differ from each chart's own defaults
+# appear here; everything else is inherited.
+#
+# Why the image tag is repeated per service rather than relying on global: the service
+# charts read .Values.image.tag directly, and a chart cannot see a sibling's values.
+# `global` is available to all subcharts, so the tag could be read from there instead —
+# that refactor is deliberately deferred until the deployment works, because it touches
+# every template.
+cart:
+  replicaCount: 1
+
+catalog:
+  replicaCount: 1
+
+checkout:
+  replicaCount: 1
+
+orders:
+  replicaCount: 1
+
+ui:
+  replicaCount: 1
+  # Why the UI is the only service a deployment would expose: it is the single
+  # user-facing component. The four APIs stay on ClusterIP.
+  service:
+    type: ClusterIP

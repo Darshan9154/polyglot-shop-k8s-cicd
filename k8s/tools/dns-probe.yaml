@@ -1,0 +1,74 @@
+# dns-probe.yaml - a diagnostic pod used to test DNS and connectivity from inside the cluster.
+#
+# Why this exists: the application pods are distroless or minimal images without nslookup or
+# dig, so DNS cannot be tested from inside them. This pod has the tools and its own service
+# account, which makes it possible to separate two very different causes of a
+# "java.net.UnknownHostException" in the application:
+#
+#   1. cluster DNS itself is broken — this pod will also fail to resolve
+#   2. cluster DNS works but the application pod is blocked from reaching it — this pod
+#      resolves fine while the application does not, which points at NetworkPolicy
+#
+# Why it is deleted after use: it has no NetworkPolicy attached, so it deliberately bypasses
+# the restrictions the application runs under. Leaving it in place would provide a standing
+# path around those restrictions.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dns-probe
+  namespace: retail-store
+  labels:
+    app.kubernetes.io/part-of: polyglot-shop
+    purpose: diagnostics
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "=== resolv.conf ==="
+          cat /etc/resolv.conf
+          echo
+          echo "=== can this pod resolve the services? ==="
+          for name in catalog cart orders checkout; do
+            if nslookup "${name}.retail-store.svc.cluster.local" >/dev/null 2>&1; then
+              echo "  DNS OK   : ${name}.retail-store.svc.cluster.local"
+            else
+              echo "  DNS FAIL : ${name}.retail-store.svc.cluster.local"
+            fi
+          done
+          echo
+          echo "=== can this pod reach the services? ==="
+          for name in catalog cart orders checkout; do
+            code="$(wget -q -O /dev/null --timeout=5 "http://${name}.retail-store.svc.cluster.local/" 2>/dev/null; echo $?)"
+            echo "  ${name}: exit=${code}"
+          done
+          echo
+          echo "=== can it reach the data namespace? ==="
+          for name in mariadb postgresql redis rabbitmq; do
+            if nslookup "${name}.data.svc.cluster.local" >/dev/null 2>&1; then
+              echo "  DNS OK   : ${name}.data.svc.cluster.local"
+            else
+              echo "  DNS FAIL : ${name}.data.svc.cluster.local"
+            fi
+          done
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 64Mi

@@ -1,0 +1,16 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# Why a budget at all on a single replica: it documents that a disruption of this
+# dependency is unavoidable, and keeps the intent explicit rather than leaving the
+# question open. The real protection for a stateful service is the volume.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "rabbitmq.fullname" . }}
+  labels:
+    {{ include "rabbitmq.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{ include "rabbitmq.selectorLabels" . | nindent 6 }}
+{{- end }}

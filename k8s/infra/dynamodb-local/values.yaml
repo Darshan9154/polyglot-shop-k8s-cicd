@@ -1,0 +1,106 @@
+# dynamodb-local values.
+
+image:
+  repository: amazon/dynamodb-local
+  # Why a pinned tag: a database image on a floating tag can change its on-disk format
+  # between restarts, which is the worst possible surprise for stored data.
+  tag: "1.20.0"
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Why 1 replica and not a cluster: this is a single-node test deployment with a 2-node
+# cluster and a fixed budget. A real deployment uses an operator (the MariaDB or
+# CloudNativePG operator) or a managed service, both of which own replication. Scaling
+# this to 2 replicas manually would produce two independent databases, not a cluster —
+# that would be worse than one, so it is left at 1 deliberately.
+replicaCount: 1
+
+component: dynamodb
+port: 8000
+portName: dynamodb
+
+args: ['-jar', 'DynamoDBLocal.jar', '-sharedDb', '-dbPath', '/home/dynamodblocal/data']
+
+# Why non-secret configuration only: credentials are referenced from the
+# polyglot-secrets Secret in the data namespace, so no password appears here.
+config:
+  {}
+
+# Maps an environment variable name to a key in the shared Secret.
+secretEnv:
+  {}
+
+# Why an explicit storageClass of "" rather than a name: an empty value means "use the
+# cluster default". The bootstrap folder documents the requirement that exactly one
+# default StorageClass exists. Set a name here to override.
+persistence:
+  enabled: true
+  storageClass: ""
+  size: 1Gi
+  # Why Retain and not Delete: deleting the StatefulSet must not silently destroy the
+  # database. A claim left behind after `helm uninstall` is a deliberate paper trail.
+  reclaimPolicyNote: "PVCs are left in place on uninstall; delete them explicitly."
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# Why a long startup allowance: a database performs first-time initialisation on an
+# empty volume, which takes far longer than a normal start. Without this the liveness
+# probe kills it mid-initialisation, the volume is left half-written, and the next start
+# fails differently. This is the single most common way a first database deploy fails.
+startupProbe:
+  enabled: true
+  failureThreshold: 20
+  periodSeconds: 10
+
+podSecurityContext:
+  runAsNonRoot: true
+  # Why this uid: it is the image's own non-root user, so the mounted volume is writable
+  # without relaxing the file mode.
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  # Why readOnlyRootFilesystem is false for databases: they legitimately write to paths
+  # outside their data directory (socket files, logs, PID files, lock files). Forcing it
+  # would require enumerating and mounting every such path and is fragile across image
+  # updates. Capabilities are still dropped and escalation is still blocked, which are
+  # the controls that actually matter here.
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+podDisruptionBudget:
+  enabled: true
+  # Why 0: with a single replica, requiring one available pod would block every node
+  # drain forever. For a stateful single instance the honest statement is that a
+  # disruption is unavoidable; the protection is the volume, not a budget.
+  minAvailable: 0
+
+networkPolicy:
+  enabled: true
+  # Why the application namespace is named and the component is named: the policy allows
+  # exactly one application service to reach exactly this dependency. That is what stops
+  # a compromised pod in the app namespace from reading another service's database.
+  #
+  # Why the "shop-" prefix: the application charts are installed under the release name
+  # "shop", so their pods carry app.kubernetes.io/component labels of the form "shop-catalog".
+  # Selecting on the bare chart name matches nothing, and the result is a database that
+  # silently refuses every connection from the service that needs it.
+  allowIngressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: retail-store
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/component: shop-cart

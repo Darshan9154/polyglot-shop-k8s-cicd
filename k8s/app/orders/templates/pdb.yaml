@@ -1,0 +1,15 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# Why a budget: node drains evict pods, and without a budget every replica can be
+# evicted at once, turning routine maintenance into an outage.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "orders.fullname" . }}
+  labels:
+    {{ include "orders.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{ include "orders.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -1,0 +1,13 @@
+# checkout — Checkout API (Node.js / NestJS), backed by Redis.
+apiVersion: v2
+name: checkout
+description: |
+  Checkout API (Node.js / NestJS), backed by Redis.
+type: application
+version: 0.1.0
+appVersion: "a785cf0"
+keywords:
+  - retail
+  - checkout
+annotations:
+  category: Application

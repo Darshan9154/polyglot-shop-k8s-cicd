@@ -1,0 +1,117 @@
+{{/*
+ui Deployment.
+
+Why a Deployment: the service holds no local state — everything persistent lives in
+its backing dependency — so replicas are interchangeable and no stable identity or
+per-pod volume is needed.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ui.fullname" . }}
+  labels:
+    {{ include "ui.labels" . | nindent 4 }}
+spec:
+  {{ if not .Values.autoscaling.enabled }}
+  # Why replicas is omitted under autoscaling: the HPA owns the count, and setting it
+  # here too means every upgrade fights the autoscaler.
+  replicas: {{ .Values.replicaCount }}
+  {{ end }}
+  selector:
+    matchLabels:
+      {{ include "ui.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Why maxUnavailable 0: the rollout must not drop below the replica count, so a
+      # broken image fails the rollout rather than replacing a working deployment.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{ include "ui.labels" . | nindent 8 }}
+      annotations:
+        # Why a checksum: configuration changes do not alter the pod template, so
+        # without this no rollout happens and old pods keep running with stale config.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      {{ with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{ toYaml . | nindent 8 }}
+      {{ end }}
+      securityContext:
+        {{ toYaml .Values.podSecurityContext | nindent 8 }}
+      # Why an explicit grace period: the default 30s can cut a request mid-flight
+      # while it drains. 45s covers the preStop delay below plus in-flight work.
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: ui
+          image: {{ include "ui.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{ toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "ui.fullname" . }}
+          env:
+            - name: JAVA_OPTS
+              value: {{ .Values.jvm.javaOpts | quote }}
+            {{ if .Values.observability.tracing.enabled }}
+            # Why OTEL_* environment variables: the application already emits OTLP
+            # traces, so pointing it at the collector is configuration, not code.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.observability.tracing.otlpEndpoint | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ include "ui.name" . | quote }}
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: {{ printf "service.namespace=%s,deployment.environment=%s" .Release.Namespace (.Values.environment | default "dev") | quote }}
+            {{ end }}
+          {{ if .Values.probes.startup.enabled }}
+          startupProbe:
+            httpGet:
+              path: {{ .Values.probes.startup.path }}
+              port: http
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+          {{ end }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          resources:
+            {{ toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            {{ if .Values.tmpfs.enabled }}
+            - name: tmp
+              mountPath: /tmp
+            {{ end }}
+          lifecycle:
+            preStop:
+              exec:
+                # Why sleep first: endpoint removal takes a moment to propagate, so
+                # draining briefly avoids failing requests that were already routed.
+                command: ["/bin/sh", "-c", "sleep 10"]
+      volumes:
+        {{ if .Values.tmpfs.enabled }}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.tmpfs.sizeLimit }}
+        {{ end }}

@@ -1,0 +1,115 @@
+{{/*
+postgresql StatefulSet.
+
+Why StatefulSet and not Deployment: this service owns its data and needs a stable
+identity. The StatefulSet gives the pod a predictable name and its own
+PersistentVolumeClaim, so the data follows the pod across reschedules. A Deployment
+with a shared volume would lose data the first time the pod moved to another node.
+
+Why the volumeClaimTemplate and not a bare PVC: the template lets the StatefulSet own
+the claim's lifecycle, so the claim is created with the pod and is not deleted when
+the pod is removed.
+*/}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "postgresql.fullname" . }}
+  labels:
+    {{ include "postgresql.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "postgresql.headless" . }}
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{ include "postgresql.selectorLabels" . | nindent 6 }}
+  # Why OnDelete: an automatic rollout of a database can leave a partially migrated
+  # volume. OnDelete makes the restart an explicit operator action.
+  updateStrategy:
+    type: OnDelete
+  template:
+    metadata:
+      labels:
+        {{ include "postgresql.labels" . | nindent 8 }}
+    spec:
+      securityContext:
+        {{ toYaml .Values.podSecurityContext | nindent 8 }}
+      # Why 60 seconds: a database needs time to flush and close its files cleanly
+      # after SIGTERM. The default 30s can cut that short and force recovery on the
+      # next start, which is exactly the failure a stateful service must avoid.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: postgresql
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{ toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: postgresql
+              containerPort: 5432
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "postgresql.fullname" . }}
+          env:
+            # Why valueFrom: the credential lives in a Secret and is never
+            # part of the chart, the values file or the rendered manifest.
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: polyglot-secrets
+                  key: DB_PASSWORD
+          {{ if .Values.startupProbe.enabled }}
+          # Why a startup probe: first-time initialisation of an empty volume is far
+          # slower than a normal start. Without this the liveness probe kills the
+          # process mid-initialisation and leaves a half-written volume.
+          startupProbe:
+            exec:
+              command:
+                - 'sh'
+                - '-c'
+                - 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+            timeoutSeconds: 5
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+          {{ end }}
+          livenessProbe:
+            exec:
+              command:
+                - 'sh'
+                - '-c'
+                - 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+            timeoutSeconds: 5
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 5
+          readinessProbe:
+            exec:
+              command:
+                - 'sh'
+                - '-c'
+                - 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+            timeoutSeconds: 5
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 5
+          resources:
+            {{ toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  {{ if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{ include "postgresql.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{ if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass }}
+        {{ end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{ end }}

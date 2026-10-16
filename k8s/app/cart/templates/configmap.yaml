@@ -1,0 +1,16 @@
+# Non-secret configuration for the cart service.
+#
+# Why a ConfigMap rather than inline env: the values are identical for every replica
+# and change independently of the image. Keeping them here means a configuration
+# change is a reviewable object rather than a deployment edit, and the Deployment's
+# checksum annotation makes that change trigger a rollout.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cart.fullname" . }}
+  labels:
+    {{- include "cart.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.config }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}

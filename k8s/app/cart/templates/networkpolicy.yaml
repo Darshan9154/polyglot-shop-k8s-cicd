@@ -1,0 +1,67 @@
+{{- if .Values.networkPolicy.enabled }}
+# Traffic rules for the cart service.
+#
+# Why this is required rather than optional: the bootstrap layer applies a
+# namespace-wide default-deny, so without a policy here the pods receive no traffic
+# at all and the readiness probe fails. The policy is therefore part of making the
+# service work, not an extra hardening step.
+#
+# Why traffic is described as host plus port: Traffic in an egress rule, `to` and
+# `ports` are siblings. `ports` belongs to the RULE, not to the peer. Putting a
+# `ports` key inside a `to` entry makes the object invalid; kubeconform rejects it.
+# The pattern below is therefore two parallel lists — one peer per destination, and
+# one rule per destination port — which is the structure the schema requires.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cart.fullname" . }}
+  labels:
+    {{- include "cart.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "cart.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Why the UI is named explicitly: it is the only caller. Anything else reaching
+    # the cart API would be lateral movement.
+    #
+    # Why "shop-ui" and not "ui": the app charts are installed under the release name "shop",
+    # so the pod labels are of the form app.kubernetes.io/component=shop-ui. This has to match
+    # the label the ui chart actually applies. Selecting on the bare chart name matches no pod
+    # at all, which blocks the legitimate caller and presents as a connection failure from the
+    # UI while every pod reports Ready.
+    {{- with .Values.networkPolicy.allowIngressFrom }}
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ $.Values.containerPort }}
+    {{- end }}
+  egress:
+    # Why each dependency is listed separately: this is an allow-list. A new
+    # dependency that is not listed here fails to connect, which is intended — it
+    # forces the dependency to be declared rather than assumed.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: data
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: dynamodb
+      ports:
+        - protocol: TCP
+          port: 8000
+    # DNS is required by every service.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}

@@ -1,0 +1,25 @@
+# Jaeger — trace storage and visualisation.
+#
+# Why Jaeger and not just the collector's debug output: the application is a distributed
+# system with five services calling each other. A trace that crosses the UI, catalog,
+# cart, orders and checkout is the only practical way to answer "why is this page slow"
+# or "where did this request fail". The collector can forward spans; something has to
+# store and display them.
+#
+# Why all-in-one rather than separate collector, query and storage components: the
+# separated deployment needs a Cassandra or Elasticsearch backend, which is more memory
+# and storage than a two-node test cluster has. All-in-one is the documented small-scale
+# deployment and is honest about its limits — see the storage values.
+apiVersion: v2
+name: jaeger
+description: |
+  Jaeger all-in-one. Receives OTLP traces forwarded by the OpenTelemetry Collector and
+  serves the trace search UI.
+type: application
+version: 0.1.0
+appVersion: "1.62.0"
+keywords:
+  - observability
+  - tracing
+annotations:
+  category: Observability

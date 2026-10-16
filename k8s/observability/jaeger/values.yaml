@@ -1,0 +1,69 @@
+# Jaeger values.
+
+image:
+  repository: jaegertracing/all-in-one
+  tag: "1.62.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  ports:
+    # Why 4317: Jaeger accepts OTLP natively, which is what the collector forwards to.
+    otlp-grpc: 4317
+    otlp-http: 4318
+    ui: 16686
+    admin: 14269
+
+# Trace retention.
+#
+# Why in-memory and why this is the honest weak point of the setup: the all-in-one
+# deployment can persist to memory or to a local volume. Memory is used here because the
+# badger/disk backend needs its own tuned volume and unbounded growth, and Cassandra or
+# Elasticsearch is far beyond a two-node test cluster. The consequence is explicit:
+# traces are lost when this pod restarts. For the purpose of demonstrating and debugging
+# end-to-end tracing that is acceptable; for production it is not, and the alternative is
+# documented rather than glossed over.
+storage:
+  type: memory
+  # Why a cap: without it a long-running trace load grows the heap until the container is
+  # OOM-killed, taking the trace UI down with it.
+  maxTraces: 50000
+
+# Why the sampling defaults are left to the application: choosing a sampling rate is a
+# policy decision that belongs with the environment, not the storage backend.
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 768Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  # Why this uid: the Jaeger image's own non-root user. The deployment is deliberately not
+  # given a writable volume, so nothing depends on ownership.
+  runAsUser: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+networkPolicy:
+  enabled: true
+  # Why only the collector may send spans: the collector is the single ingest point.
+  # Allowing the application namespace directly would bypass the collector's batching and
+  # memory limiting, and would make the pipeline impossible to reason about.
+  allowIngressFromCollector: true
+  # Why Grafana is also allowed: it queries Jaeger as a data source for the
+  # trace-to-logs and exemplar views.
+  allowIngressFromGrafana: true

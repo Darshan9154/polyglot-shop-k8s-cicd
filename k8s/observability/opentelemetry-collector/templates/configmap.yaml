@@ -1,0 +1,132 @@
+﻿{{/*
+Collector configuration.
+
+Why this is a ConfigMap and not baked into an image: the pipeline is the thing that
+changes Ã¢â‚¬â€ a new exporter, a sampling decision, a different backend Ã¢â‚¬â€ and it should be a
+reviewable diff rather than an image build. The Deployment carries a checksum of this
+object so a change triggers a rollout.
+
+Why the pipeline order matters and is not arbitrary:
+  memory_limiter  first, so the collector sheds load before the kernel kills it
+  batch           last before export, so spans are sent in groups rather than one at a time
+Reversing these is a common mistake: batching before the limiter means memory grows
+while batches accumulate.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "otel.fullname" . }}-config
+  labels:
+    {{- include "otel.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    receivers:
+      # Why OTLP on both transports: gRPC is the default for the Java agents and HTTP is
+      # simpler for the Node service. Supporting both avoids a per-service decision.
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:{{ (index .Values.service.ports "otlp-grpc") }}
+          http:
+            endpoint: 0.0.0.0:{{ (index .Values.service.ports "otlp-http") }}
+
+    processors:
+      # Why this is first in the pipeline: it limits the collector's own memory so a
+      # burst of spans results in dropped data rather than an OOM kill of the collector,
+      # which would lose every trace until it restarted.
+      memory_limiter:
+        check_interval: {{ .Values.memoryLimiter.checkInterval }}
+        limit_mib: {{ .Values.memoryLimiter.limitMiB }}
+        spike_limit_mib: {{ .Values.memoryLimiter.spikeLimitMiB }}
+
+      # Why batch: one export per span would generate a request per span. Batching is
+      # what makes trace ingest affordable on a small backend.
+      batch:
+        timeout: {{ .Values.batch.timeout }}
+        send_batch_size: {{ .Values.batch.sendBatchSize }}
+        send_batch_max_size: {{ .Values.batch.sendBatchMaxSize }}
+
+      # Why resource detection: it stamps the collector's own attributes onto spans so a
+      # trace can be tied to the node that produced it, which matters when only one of
+      # several nodes is misbehaving.
+      # Why `resource_detection` and not `resourcedetection`: 0.162.0 logs
+      #
+      #   "resourcedetection" alias is deprecated; use "resource_detection" instead
+      #
+      # The old name still works today, but it is deprecated and will eventually be removed.
+      # Renaming now avoids a pipeline that fails to start after an upgrade. The name was
+      # confirmed against the binary's own component list, not assumed.
+      resource_detection:
+        detectors: [env, system]
+        timeout: 2s
+        override: false
+
+    exporters:
+      {{- if .Values.backends.jaeger.enabled }}
+      # Why `otlp_grpc` and not `otlp`: 0.162.0 logs
+      #
+      #   "otlp" alias is deprecated; use "otlp_grpc" instead
+      #
+      # and the binary's component list confirms the exporter is registered as `otlp_grpc` â€”
+      # `otlp` is the RECEIVER's name, and using it for the exporter worked only through a
+      # deprecated alias. The `/jaeger` suffix keeps the name descriptive if a second exporter
+      # is added later.
+      otlp_grpc/jaeger:
+        # Why OTLP rather than the legacy jaeger exporter: OTLP is the current protocol
+        # and the legacy exporter is deprecated. Jaeger accepts OTLP natively.
+        endpoint: {{ .Values.backends.jaeger.endpoint }}
+        tls:
+          # Why insecure: the hop is inside the cluster over the pod network and Jaeger's
+          # OTLP receiver does not terminate TLS. Enabling TLS here would simply fail to
+          # connect. Traffic that leaves the cluster would need TLS.
+          insecure: true
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+        sending_queue:
+          # Why a queue: if Jaeger restarts, spans are buffered and retried instead of
+          # being dropped, which is the difference between a gap and a spike of failures.
+          enabled: true
+          num_consumers: 10
+          queue_size: 1000
+      {{- end }}
+      {{- if .Values.backends.debug.enabled }}
+      debug:
+        # Why available: when traces are not arriving, printing every span proves
+        # whether the collector received them, which separates an application problem
+        # from a pipeline problem.
+        verbosity: {{ .Values.backends.debug.verbosity }}
+      {{- end }}
+
+    extensions:
+      # Why a health endpoint: the readiness and liveness probes need something to call.
+      # Without it the collector reports ready before its pipelines start.
+      health_check:
+        endpoint: 0.0.0.0:{{ .Values.service.ports.health }}
+
+    service:
+      extensions: [health_check]
+      # Why the collector's own telemetry is exposed: it shows whether spans are being
+      # dropped, queued or refused, which is the first thing to look at when traces are
+      # missing.
+      telemetry:
+        metrics:
+          level: normal
+          readers:
+            - pull:
+                exporter:
+                  prometheus:
+                    host: 0.0.0.0
+                    port: {{ .Values.service.ports.metrics }}
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, resource_detection, batch]
+          exporters:
+            {{- if .Values.backends.jaeger.enabled }}
+            - otlp_grpc/jaeger
+            {{- end }}
+            {{- if .Values.backends.debug.enabled }}
+            - debug
+            {{- end }}

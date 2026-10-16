@@ -1,0 +1,81 @@
+# Loki values.
+
+image:
+  repository: grafana/loki
+  tag: "3.3.2"
+  pullPolicy: IfNotPresent
+
+# Why single-binary: one process runs the read path, write path and compactor. It cannot
+# scale horizontally, and it is the documented deployment for small clusters. The
+# alternative needs object storage and several workloads.
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  ports:
+    http: 3100
+    # Why the gRPC port: Loki uses it for internal component communication even in
+    # single-binary mode, and the readiness endpoint depends on it being reachable.
+    grpc: 9095
+
+# Log retention.
+#
+# Why these values are short and why that is deliberate: retention directly controls disk
+# usage, and the storage comes out of the same credit budget as everything else. Seven
+# days is enough to debug a deployment that just happened, which is the purpose here.
+# A production deployment would use object storage (S3) and a much longer retention.
+retention:
+  enabled: true
+  days: 7
+
+persistence:
+  enabled: true
+  # Why an explicit size: without a bound, a log flood fills the node's disk and takes
+  # down unrelated workloads. An explicit claim caps the damage.
+  size: 5Gi
+  storageClass: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 768Mi
+
+# Why the ingestion limits are set rather than left to defaults: a single service in a
+# crash loop can produce an enormous volume of identical lines. These limits apply back
+# pressure instead of letting that fill the volume.
+limits:
+  ingestionRateMB: 4
+  ingestionBurstMB: 6
+  maxStreamsPerUser: 5000
+  # Why a rejection policy: "drop" discards over-limit lines silently, which loses the
+  # very logs that explain an incident. "rate_limited" slows the sender instead.
+  ingestionBurstPolicy: rate_limited
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  # Why false: Loki writes its index, chunks and WAL under /loki. Making the root
+  # read-only would require those paths to be separate mounts; the capability drop and
+  # non-root user are the controls that matter.
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop:
+      - ALL
+
+networkPolicy:
+  enabled: true
+  # Why the whole application namespace may push logs: every service writes logs, so an
+  # allow-list of individual services would have to be updated whenever one is added. Log
+  # lines are lower risk than span payloads, so namespace-wide ingest is an acceptable
+  # tradeoff recorded here rather than a silent decision.
+  allowIngressFromNamespace: retail-store
+  allowIngressFromGrafana: true

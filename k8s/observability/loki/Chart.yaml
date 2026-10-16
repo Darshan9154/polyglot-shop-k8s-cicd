@@ -1,0 +1,25 @@
+# Loki — log aggregation.
+#
+# Why Loki and not the ELK stack: Loki indexes labels rather than the full text of every
+# log line. That makes it dramatically cheaper in memory and disk, which is the deciding
+# factor on a two-node cluster with a fixed credit budget. The tradeoff is that free-text
+# search is slower, which is acceptable for this deployment's traffic.
+#
+# Why this chart is hand-written rather than the upstream loki chart: the upstream chart
+# is built around the distributed deployment (distributor, ingester, querier, compactor
+# as separate workloads) and its values surface reflects that. For a single-binary
+# deployment with a filesystem backend, a small explicit chart has far less to go wrong
+# and the storage configuration is visible rather than inherited.
+apiVersion: v2
+name: loki
+description: |
+  Loki in single-binary mode. Receives logs from the application namespace and serves
+  LogQL queries to Grafana.
+type: application
+version: 0.1.0
+appVersion: "3.3.2"
+keywords:
+  - observability
+  - logging
+annotations:
+  category: Observability

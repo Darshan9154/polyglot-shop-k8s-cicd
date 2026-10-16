@@ -1,0 +1,13 @@
+# catalog — Product catalog API (Go / Gin), backed by MariaDB.
+apiVersion: v2
+name: catalog
+description: |
+  Product catalog API (Go / Gin), backed by MariaDB.
+type: application
+version: 0.1.0
+appVersion: "a785cf0"
+keywords:
+  - retail
+  - catalog
+annotations:
+  category: Application

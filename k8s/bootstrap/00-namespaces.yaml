@@ -1,0 +1,77 @@
+# Namespace layout for the Polyglot Shop deployment.
+#
+# Why three namespaces rather than one: the application, the backing services and
+# the observability stack have different lifetimes and different access needs. The
+# application can be redeployed without touching monitoring, and monitoring can be
+# removed without risking application data. Splitting them also makes the
+# NetworkPolicies meaningful, because a policy cannot allow or deny traffic that
+# shares a namespace with its target.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: retail-store
+  labels:
+    # Why the label: NetworkPolicies and PodSecurity admission select namespaces by
+    # label, not by name, so the restriction travels with the namespace if it is
+    # ever renamed.
+    app.kubernetes.io/part-of: polyglot-shop
+    # Why "restricted": it is the strictest Pod Security Standard. It enforces
+    # non-root, no privilege escalation, dropped capabilities and seccomp at
+    # admission time, so a manifest that regresses the posture is rejected by the
+    # cluster instead of quietly running.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: data
+  labels:
+    app.kubernetes.io/part-of: polyglot-shop
+    # Why the same standard: databases are the components most likely to be given
+    # privileged settings out of convenience. Enforcing restricted here prevents
+    # that, and the official images used all support running unprivileged.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    app.kubernetes.io/part-of: polyglot-shop
+    # Why "privileged" for this namespace specifically, and why that is not a shortcut:
+    #
+    #   node-exporter reads node-level metrics through hostPath volumes for /proc, /sys and /,
+    #   runs with hostNetwork and hostPID, and binds hostPort 9100. That is not a misconfiguration
+    #   to be fixed — it is what the component does. There is no Pod Security Standard that
+    #   permits it, and there is no per-pod exemption in Kubernetes: the standard applies to a
+    #   whole namespace.
+    #
+    #   The consequence of leaving this at a stricter level was concrete and visible:
+    #
+    #     Error creating: pods "monitoring-prometheus-node-exporter-..." is forbidden:
+    #     violates PodSecurity "baseline:latest": host namespaces (hostNetwork=true,
+    #     hostPID=true), hostPath volumes (volumes "proc", "sys", "root"), hostPort 9100
+    #
+    #   and the DaemonSet reported DESIRED 0 with no pods at all. Without node-exporter there are
+    #   no node-level CPU, memory, filesystem or network metrics, so the most likely failure mode
+    #   on a small cluster — a node running out of memory or disk — is invisible.
+    #
+    # Why this is scoped and audited rather than simply opened:
+    #
+    #   `enforce` is relaxed because it must be for these components to run at all. `audit` and
+    #   `warn` stay at `restricted`, so every privileged pod in this namespace is still recorded
+    #   in the audit log and reported by kubectl. The relaxation is permissive but not silent.
+    #
+    #   Nothing from the application namespace runs here. The application and its databases run
+    #   under `restricted`, where they cannot obtain host access at all.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

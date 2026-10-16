@@ -1,0 +1,102 @@
+{{/*
+Loki StatefulSet.
+
+Why StatefulSet and not Deployment: Loki writes its index, chunks and write-ahead log to
+a PersistentVolumeClaim and relies on that data surviving a restart. A StatefulSet gives
+the pod a stable identity and owns its claim, so the log data follows the pod rather than
+being lost when it is rescheduled to another node.
+*/}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "loki.fullname" . }}
+  labels:
+    {{- include "loki.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "loki.fullname" . }}
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "loki.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "loki.labels" . | nindent 8 }}
+      annotations:
+        # Why a config checksum: Loki reads its config once at startup. Without this
+        # annotation an edit to the ConfigMap does not change the pod template, so no
+        # restart happens and the running instance keeps serving with the old limits.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # Why 60 seconds: on shutdown Loki flushes in-flight chunks and finishes the current
+      # WAL segment. Killing it sooner forces a replay on the next start.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: loki
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          args:
+            # Why the config path is explicit: the image's default config is a minimal
+            # development configuration with no retention and no limits.
+            - "-config.file=/etc/loki/config.yaml"
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.ports.http }}
+              protocol: TCP
+            - name: grpc
+              containerPort: {{ .Values.service.ports.grpc }}
+              protocol: TCP
+          # Why the readiness endpoint and not a TCP check: /ready reports that the
+          # ingester ring is formed and the store is usable. A bound port would report
+          # ready while Loki is still initialising and would reject pushes.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loki
+              readOnly: true
+            - name: data
+              mountPath: /loki
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "loki.fullname" . }}-config
+            items:
+              - key: config.yaml
+                path: config.yaml
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "loki.labels" . | nindent 10 }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        {{- if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+  {{- end }}

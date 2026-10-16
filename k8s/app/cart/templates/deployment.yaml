@@ -1,0 +1,159 @@
+{{/*
+cart Deployment.
+
+Why a Deployment and not a StatefulSet: the cart service keeps no local state. Its
+data lives in DynamoDB, so any replica is interchangeable and no stable network
+identity or per-pod volume is required.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cart.fullname" . }}
+  labels:
+    {{- include "cart.labels" . | nindent 4 }}
+spec:
+  {{- if not (.Values.autoscaling | default dict).enabled }}
+  # Why replicas is omitted when autoscaling is enabled: the HorizontalPodAutoscaler
+  # owns the replica count, and setting it here as well means every `helm upgrade`
+  # fights the autoscaler and resets the count.
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "cart.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Why maxUnavailable 0: a rolling update must not take the service below its
+      # replica count. With replicaCount 1 this means the new pod must become ready
+      # before the old one is removed, so a broken image fails the rollout instead
+      # of replacing a working deployment.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "cart.labels" . | nindent 8 }}
+      annotations:
+        # Why a checksum of the ConfigMap: without it, changing configuration does
+        # not change the pod template, so no rollout is triggered and the running
+        # pods keep the old values until something else restarts them.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # Why an explicit termination grace period: the default 30s can cut a JVM
+      # mid-flight while it is still draining requests. 45s lets an in-flight request
+      # finish after the preStop sleep below.
+      terminationGracePeriodSeconds: 45
+      containers:
+        - name: cart
+          image: {{ include "cart.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "cart.fullname" . }}
+          env:
+            - name: JAVA_OPTS
+              value: {{ .Values.jvm.javaOpts | quote }}
+            {{- if .Values.dummyAwsCredentials.enabled }}
+            # Why these are placeholders: DynamoDB Local ignores the values but the
+            # AWS SDK will not start without them. They authorise nothing. Pointing
+            # this at real DynamoDB requires IRSA, not better fake keys.
+            - name: AWS_ACCESS_KEY_ID
+              value: {{ .Values.dummyAwsCredentials.accessKeyId | quote }}
+            - name: AWS_SECRET_ACCESS_KEY
+              value: {{ .Values.dummyAwsCredentials.secretAccessKey | quote }}
+            {{- end }}
+            {{- if .Values.observability.tracing.enabled }}
+            # Why OTEL_* as environment variables: the application already exports
+            # OTLP traces, so pointing it at the collector is configuration only.
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.observability.tracing.otlpEndpoint | quote }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ include "cart.name" . | quote }}
+            # Why resource attributes: they attach the namespace and environment to
+            # every span, so traces can be filtered by environment in Jaeger rather
+            # than by guessing from the service name.
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: {{ printf "service.namespace=%s,deployment.environment=%s" .Release.Namespace (.Values.environment | default "dev") | quote }}
+            {{- end }}
+          {{- if .Values.probes.startup.enabled }}
+          # Why a startup probe: a JVM service can take tens of seconds to answer.
+          # The liveness probe is suspended until this succeeds, which stops a slow
+          # start from being mistaken for a hung process and restarted forever.
+          startupProbe:
+            httpGet:
+              path: {{ .Values.probes.startup.path }}
+              port: http
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+          # Why a readiness probe separate from liveness: a pod that cannot serve
+          # traffic should be removed from the Service, not killed. Conflating the two
+          # turns a dependency outage into a restart storm.
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.tmpfs.enabled }}
+            # Why a tmpfs for /tmp: the root filesystem is read-only, so anything that
+            # writes a temporary file needs a writable mount. This mirrors the tmpfs
+            # the Compose service declared.
+            - name: tmp
+              mountPath: /tmp
+            {{- end }}
+          lifecycle:
+            preStop:
+              exec:
+                # Why sleep before termination: the pod is marked terminating, but
+                # endpoints take a moment to propagate everywhere. Sleeping briefly
+                # lets in-flight requests drain instead of failing at the client.
+                command: ["/bin/sh", "-c", "sleep 10"]
+      volumes:
+        {{- if .Values.tmpfs.enabled }}
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.tmpfs.sizeLimit }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

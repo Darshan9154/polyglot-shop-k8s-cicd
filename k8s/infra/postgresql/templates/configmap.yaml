@@ -1,0 +1,15 @@
+# Non-secret configuration for postgresql.
+#
+# Why credentials are absent here: they come from the polyglot-secrets Secret. This
+# ConfigMap is safe to read, and is the object to inspect when diagnosing a connection
+# problem, without exposing a password.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "postgresql.fullname" . }}
+  labels:
+    {{ include "postgresql.labels" . | nindent 4 }}
+data:
+  {{ range $key, $value := .Values.config }}
+  {{ $key }}: {{ $value | quote }}
+  {{ end }}

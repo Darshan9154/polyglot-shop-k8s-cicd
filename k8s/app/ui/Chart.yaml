@@ -1,0 +1,13 @@
+# ui — Storefront (Java / Spring Boot). The only externally exposed component.
+apiVersion: v2
+name: ui
+description: |
+  Storefront (Java / Spring Boot). The only externally exposed component.
+type: application
+version: 0.1.0
+appVersion: "a785cf0"
+keywords:
+  - retail
+  - ui
+annotations:
+  category: Application

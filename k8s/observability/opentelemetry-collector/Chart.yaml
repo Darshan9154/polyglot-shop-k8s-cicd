@@ -1,0 +1,31 @@
+﻿# OpenTelemetry Collector â€” the single place every service sends telemetry.
+#
+# Why a collector rather than exporting straight from each application to Jaeger:
+# with a collector in between, the applications hold one configurable endpoint and the
+# backend can change without touching or redeploying any service. The collector also
+# gives one place to sample, batch, filter attributes and fan out to several backends,
+# which is the difference between a working tracing setup and one you can operate.
+#
+# Why the application services already work with this: the upstream sample emits OTLP
+# natively, so the app charts only set OTEL_EXPORTER_OTLP_ENDPOINT. Nothing has to be
+# instrumented here.
+#
+# Why this chart is hand-written rather than a subchart of the upstream
+# opentelemetry-collector chart: that chart carries a large value surface for
+# deployment modes this cluster does not use (gateway, daemonset, autoscaling). For one
+# deployment with one ConfigMap, a small chart is easier to read and to debug, and the
+# collector configuration is the part that actually matters.
+apiVersion: v2
+name: opentelemetry-collector
+description: |
+  OpenTelemetry Collector. Receives OTLP traces from the application services and
+  forwards them to Jaeger, and exposes its own metrics for Prometheus to scrape.
+type: application
+version: 0.1.0
+appVersion: "0.162.0"
+keywords:
+  - observability
+  - tracing
+  - otlp
+annotations:
+  category: Observability

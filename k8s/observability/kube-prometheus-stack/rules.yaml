@@ -1,0 +1,174 @@
+# Alerting rules for the Polyglot Shop application.
+#
+# Why these are written rather than only relying on the chart's defaults: the defaults that
+# ship with kube-prometheus-stack cover cluster-level problems such as a node not ready.
+# They do not know that this deployment has five services with dependencies, so a service
+# that cannot reach its database does not produce a useful alert out of the box.
+#
+# Why every rule has a `for` duration: an alert that fires on a single scrape is a
+# notification storm during a normal rollout. The durations here are chosen so that an
+# ordinary rolling restart does not page anyone, while a genuine failure does.
+#
+# Why each rule states what it means: an alert name alone does not tell the person on call
+# what to check. The annotations carry the symptom and the first thing to look at.
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: polyglot-app-alerts
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: polyglot-shop
+    # Why this label: the Prometheus Operator only loads rules matching its selector. With
+    # ruleSelectorNilUsesHelmValues set false in the values, this label is not required,
+    # but keeping it means the rules load even if that setting is later changed.
+    release: monitoring
+spec:
+  groups:
+    - name: polyglot-app.availability
+      rules:
+        # Why this rule exists: a Deployment can report itself as updated while its pods are
+        # crashing. This catches the case where the rollout looked successful but the
+        # service is not actually running.
+        - alert: PolyglotServiceUnavailable
+          expr: |
+            kube_deployment_status_replicas_available{namespace="retail-store"}
+              < kube_deployment_spec_replicas{namespace="retail-store"}
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "{{ $labels.deployment }} has fewer available replicas than desired"
+            description: >-
+              {{ $labels.deployment }} in {{ $labels.namespace }} has
+              {{ $value }} available replicas below its desired count for 5 minutes.
+              Check: kubectl -n retail-store get pods -l app.kubernetes.io/name={{ $labels.deployment }}
+              then describe the pod and read the previous container logs.
+
+        # Why a restart-count rule: a crash loop is the most common failure for these
+        # services, and the replica count can stay at the desired value while pods restart
+        # repeatedly, so the availability rule above would not fire.
+        - alert: PolyglotPodCrashLooping
+          expr: |
+            increase(kube_pod_container_status_restarts_total{namespace="retail-store"}[15m]) > 3
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "{{ $labels.pod }} is restarting repeatedly"
+            description: >-
+              Container {{ $labels.container }} in {{ $labels.pod }} restarted more than
+              3 times in 15 minutes. Read the previous logs:
+              kubectl -n retail-store logs {{ $labels.pod }} -c {{ $labels.container }} --previous
+
+        # Why a probe-specific rule: a readiness failure removes a pod from its Service
+        # without killing it, so the pod keeps running and the container restart count stays
+        # flat while the service silently loses capacity.
+        - alert: PolyglotReadinessProbeFailing
+          expr: |
+            kube_pod_status_ready{namespace="retail-store", condition="true"} == 0
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "{{ $labels.pod }} is not ready"
+            description: >-
+              {{ $labels.pod }} has been unready for 10 minutes. The pod is running but
+              removed from its Service, so requests are not reaching it. Check the
+              readiness probe in `kubectl -n retail-store describe pod {{ $labels.pod }}`.
+
+    - name: polyglot-app.resources
+      rules:
+        # Why OOMKilled specifically: a JVM killed for memory looks like a crash loop from
+        # outside, and the fix is a limit change, not a code change. Naming it saves
+        # misdiagnosis.
+        - alert: PolyglotContainerOOMKilled
+          expr: |
+            kube_pod_container_status_last_terminated_reason{namespace="retail-store", reason="OOMKilled"} == 1
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "{{ $labels.pod }} was OOMKilled"
+            description: >-
+              Container {{ $labels.container }} in {{ $labels.pod }} was killed for
+              exceeding its memory limit. Either the limit is too low for the workload or
+              the process is leaking. Compare the memory request and limit in the chart
+              values against actual usage.
+
+        # Why a CPU throttling rule: throttling degrades latency without producing errors,
+        # so it is invisible unless it is measured. It is the usual cause of "the site feels
+        # slow but nothing is failing".
+        - alert: PolyglotContainerCPUThrottling
+          expr: |
+            rate(container_cpu_cfs_throttled_periods_total{namespace="retail-store"}[5m])
+              / rate(container_cpu_cfs_periods_total{namespace="retail-store"}[5m]) > 0.25
+          for: 15m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "{{ $labels.pod }} is being CPU throttled"
+            description: >-
+              Container {{ $labels.container }} had more than 25% of its CPU periods
+              throttled for 15 minutes. The CPU limit is too low for the traffic, which
+              shows up as latency rather than errors.
+
+    - name: polyglot-app.persistence
+      rules:
+        # Why a volume rule: these workloads use persistent volumes for databases and for
+        # Prometheus itself. A full volume is the classic silent failure — writes start
+        # failing and the process may keep running.
+        - alert: PolyglotPersistentVolumeFillingUp
+          expr: |
+            kubelet_volume_stats_available_bytes{namespace=~"retail-store|data|monitoring"}
+              / kubelet_volume_stats_capacity_bytes{namespace=~"retail-store|data|monitoring"} < 0.15
+          for: 15m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "Persistent volume {{ $labels.persistentvolumeclaim }} is nearly full"
+            description: >-
+              The volume for {{ $labels.persistentvolumeclaim }} has less than 15% free
+              space. For a database this leads to failed writes; for Prometheus it means
+              the retention setting is not keeping up with the series count.
+
+    - name: polyglot-app.observability
+      rules:
+        # Why a rule on the collector: if the collector drops spans, tracing appears to work
+        # while quietly losing data. This makes the loss visible rather than leaving someone
+        # to conclude traces are not generated.
+        - alert: OTelCollectorDroppingSpans
+          expr: |
+            rate(otelcol_processor_dropped_spans[5m]) > 0
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "OpenTelemetry Collector is dropping spans"
+            description: >-
+              The collector is discarding spans, usually because the queue is full and the
+              backend is not keeping up. Traces will be incomplete. Check Jaeger's state and
+              the collector's memory limit.
+
+        # Why a rule on the queue: a filling queue is the leading indicator of the drop
+        # above, so alerting here gives time to react before data is lost.
+        - alert: OTelCollectorQueueFilling
+          expr: |
+            otelcol_exporter_queue_size / otelcol_exporter_queue_capacity > 0.8
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "OpenTelemetry Collector export queue is over 80% full"
+            description: >-
+              The collector is unable to export spans as fast as it receives them. The
+              backend is down, unreachable, or too slow. Spans will be dropped once the
+              queue is full.

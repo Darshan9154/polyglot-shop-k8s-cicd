@@ -1,0 +1,53 @@
+# StorageClass for the EBS CSI driver.
+#
+# Why this file is necessary and why the cluster's own class does not work:
+#
+# EKS creates a `gp2` StorageClass whose provisioner is `kubernetes.io/aws-ebs`. That is the
+# deprecated in-tree provisioner, and it has been removed from recent Kubernetes versions.
+# The result is subtle:
+#
+#   * the class appears in `kubectl get storageclass` and looks healthy
+#   * a PersistentVolumeClaim that omits storageClassName gets an EMPTY storageClassName,
+#     because the default class cannot be used
+#   * the scheduler then reports
+#       "0/2 nodes are available: pod has unbound immediate PersistentVolumeClaims"
+#     which reads like a capacity problem and is not one
+#   * the pods sit Pending forever and the CSI controller logs nothing about provisioning,
+#     because it was never asked to provision anything
+#
+# Why gp3 rather than repairing gp2: gp3 is the current general-purpose volume type with a
+# lower price per GB and independent IOPS/throughput, so it is the right default for a new
+# cluster. There is no reason to build on the older type here.
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  labels:
+    app.kubernetes.io/part-of: polyglot-shop
+  annotations:
+    # Why this annotation: it makes gp3 the default for any claim that does not name a
+    # class, which is every claim in the charts. Without it those claims keep getting an
+    # empty class and stay Pending.
+    storageclass.kubernetes.io/is-default-class: "true"
+# Why the CSI provisioner and not kubernetes.io/aws-ebs: this is the driver installed as an
+# EKS add-on. The in-tree provisioner no longer exists, which is the whole reason this class
+# is needed.
+provisioner: ebs.csi.aws.com
+# Why WaitForFirstConsumer: the volume is created in the same availability zone as the pod
+# that uses it. With Immediate binding the volume is created first, in an arbitrary AZ, and
+# the pod can then be unschedulable because its volume exists in a different zone than the
+# node it was placed on. WaitForFirstConsumer is the setting that makes multi-AZ work.
+volumeBindingMode: WaitForFirstConsumer
+# Why Delete: the volumes hold test data whose lifecycle is the same as the claim. The charts
+# note that claims survive `helm uninstall`; the underlying EBS volume is released when the
+# claim is finally deleted. Production data would use Retain.
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+parameters:
+  # Why gp3 with explicit type: the CSI driver maps this to the EBS volume type.
+  type: gp3
+  fsType: ext4
+  # Why encryption is left to the default: the account's EBS encryption default applies.
+  # Setting it explicitly here would also be correct; what matters is that volumes are not
+  # created unencrypted, and the account default covers that.

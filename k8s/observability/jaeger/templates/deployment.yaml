@@ -1,0 +1,80 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "jaeger.fullname" . }}
+  labels:
+    {{- include "jaeger.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "jaeger.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: Recreate
+    # Why Recreate and not RollingUpdate: there is one replica and the storage is the
+    # pod's memory, so a rolling update would momentarily run two instances holding
+    # different trace sets while the Service still points at both. Recreate is honest
+    # about the fact that this restart loses traces.
+  template:
+    metadata:
+      labels:
+        {{- include "jaeger.labels" . | nindent 8 }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # Why a short grace period: there is nothing to flush to disk. Waiting longer only
+      # delays a restart that has already lost its in-memory traces.
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: jaeger
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            # Why a memory cap is passed to Jaeger as well as a container limit: the
+            # container limit makes the kernel kill the process. The application-level cap
+            # makes Jaeger evict old traces first, which keeps the UI alive and degrades
+            # gracefully instead of disappearing.
+            - name: MEMORY_MAX_TRACES
+              value: {{ .Values.storage.maxTraces | quote }}
+            - name: SPAN_STORAGE_TYPE
+              value: {{ .Values.storage.type | quote }}
+            # Why the collector endpoint is set: with OTLP enabled, Jaeger exposes both a
+            # receiver and a gRPC endpoint used by the UI's internal query path.
+            - name: COLLECTOR_OTLP_ENABLED
+              value: "true"
+          ports:
+            - name: otlp-grpc
+              containerPort: {{ (index .Values.service.ports "otlp-grpc") }}
+              protocol: TCP
+            - name: otlp-http
+              containerPort: {{ (index .Values.service.ports "otlp-http") }}
+              protocol: TCP
+            - name: ui
+              containerPort: {{ .Values.service.ports.ui }}
+              protocol: TCP
+            - name: admin
+              containerPort: {{ .Values.service.ports.admin }}
+              protocol: TCP
+          # Why the admin port is used for probes: it answers as soon as the process is
+          # up, independently of whether any traces have been received. Probing the UI port
+          # would couple container health to a working HTTP server.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: admin
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: admin
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

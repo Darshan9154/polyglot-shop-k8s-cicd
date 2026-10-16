@@ -1,0 +1,148 @@
+# checkout values — defaults sized for the small test cluster. Each compromise is
+# recorded next to the setting, per the project rule that a compromise must carry
+# its reason rather than being silent.
+
+# Why 1 replica: two worker nodes cannot hold more, and two nodes are not real
+# availability regardless. Raise together with podDisruptionBudget.minAvailable.
+replicaCount: 1
+
+image:
+  repository: 536882095289.dkr.ecr.eu-north-1.amazonaws.com/polyglot-shop/checkout
+  # Why a tag and never ":latest": a mutable tag makes a deployment unreproducible.
+  # Pin image.digest once the pipeline records one.
+  tag: "a785cf0"
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+containerPort: 8080
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+# Why these match the Compose service definition: they are the application's own
+# configuration contract. Changing them changes behaviour, not just packaging.
+config:
+  RETAIL_CHECKOUT_PERSISTENCE_PROVIDER: "redis"
+  RETAIL_CHECKOUT_PERSISTENCE_REDIS_URL: "redis://redis.data.svc.cluster.local:6379"
+
+# Why secrets are referenced rather than stored: passwords arrive from the
+# polyglot-secrets Secret in the checkout namespace. No credential appears in this file.
+secretEnv:
+  {}
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+probes:
+  startup:
+    # Why a startup probe: checkout takes time to initialise, and without this the
+    # liveness probe would kill it mid-start and produce a restart loop.
+    enabled: true
+    path: /health
+    failureThreshold: 30
+    periodSeconds: 5
+  liveness:
+    enabled: true
+    path: /health
+    initialDelaySeconds: 20
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    # Why readiness is separate from liveness: an unready pod should leave the Service
+    # rather than be restarted. Conflating them turns a dependency outage into a
+    # restart storm.
+    enabled: true
+    path: /health
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+tmpfs:
+  # Why: the root filesystem is read-only, so the process needs a writable temporary
+  # directory. Matching the Compose tmpfs keeps the same posture.
+  enabled: true
+  sizeLimit: 128Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  # Why 1000: the images create their user with uid 1000.
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  # Why false for this service: the image writes outside /tmp (compiled output and
+  # a healthcheck script), so a read-only root would crash it in a restart loop.
+  # This is recorded rather than asserted, and is the one service that differs.
+  capabilities:
+    drop:
+      - ALL
+    add:
+      # Why kept from the Compose definition: it allows binding below port 1024. The
+      # service listens on 8080 and does not need it, so it is a no-op retained for
+      # parity with the tested configuration.
+      - NET_BIND_SERVICE
+
+podDisruptionBudget:
+  # Why minAvailable 0 at one replica: a budget demanding an available pod would block
+  # node drains permanently. Raise this when replicaCount is raised.
+  enabled: true
+  minAvailable: 0
+
+networkPolicy:
+  enabled: true
+  # Why only these callers: each is a service that genuinely calls it.
+  # Anything else would be lateral movement.
+  allowIngressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: retail-store
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/component: shop-ui
+  allowEgressTo:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: data
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+
+observability:
+  metrics:
+    enabled: true
+    port: 8080
+  tracing:
+    enabled: true
+    otlpEndpoint: "http://otel-collector.monitoring.svc.cluster.local:4317"
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+autoscaling:
+  # Why disabled: the test cluster has fixed two-node capacity, so scaling out would
+  # only create Pending pods. Configured so enabling it later is a values change.
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 75

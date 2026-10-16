@@ -1,0 +1,63 @@
+﻿{{- if .Values.networkPolicy.enabled }}
+# Traffic rules for Jaeger.
+#
+# Why the collector is the only sender: it is the single ingest point, and it holds the
+# batching and memory limiting that keep the backend healthy. Letting application pods
+# send directly would bypass both and make trace volume unpredictable.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "jaeger.fullname" . }}
+  labels:
+    {{- include "jaeger.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "jaeger.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    {{- if .Values.networkPolicy.allowIngressFromCollector }}
+    # Why `from` and `ports` are siblings: `ports` belongs to the rule, not to the peer.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: otel-collector
+      ports:
+        - protocol: TCP
+          port: {{ (index .Values.service.ports "otlp-grpc") }}
+        - protocol: TCP
+          port: {{ (index .Values.service.ports "otlp-http") }}
+    {{- end }}
+    {{- if .Values.networkPolicy.allowIngressFromGrafana }}
+    # Why Grafana may read: it queries Jaeger as a data source for the trace view, which
+    # is how a slow span is traced back to the logs of the service that produced it.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: grafana
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.ports.ui }}
+    {{- end }}
+  egress:
+    # Why a trace backend needs outbound access at all: only DNS. The in-memory storage
+    # means there is no database to reach, so anything more would be an unnecessary path
+    # out of a component that processes untrusted span payloads.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}

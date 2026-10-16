@@ -1,0 +1,99 @@
+# ServiceMonitors — how Prometheus discovers and scrapes the application.
+#
+# Why two objects and not one:
+#
+#   The five services do not expose metrics at the same path. The three Java services (cart,
+#   orders, ui) expose Spring Boot Actuator metrics at /actuator/prometheus; the Go catalog and
+#   the Node checkout expose them at /metrics. Both facts were verified against the running
+#   cluster:
+#
+#     shop-catalog  -> /actuator/prometheus=404  /metrics=200
+#     shop-cart     -> /actuator/prometheus=200  /metrics=404
+#     shop-checkout -> /actuator/prometheus=404  /metrics=200
+#     shop-orders   -> /actuator/prometheus=200  /metrics=404
+#     shop-ui       -> /actuator/prometheus=200  /metrics=404
+#
+#   A single ServiceMonitor with two endpoints on the same port would scrape every Service
+#   twice: once succeeding, once returning 404 on every interval, forever. Prometheus would
+#   report half the targets as permanently down, and that noise would hide a real failure when
+#   one occurred.
+#
+#   The Services carry a `polyglot-shop/metrics-path` label — `actuator` on the Java services,
+#   `direct` on the others — and each ServiceMonitor selects one value. A service added later
+#   needs the correct label, or it simply is not scraped, which is visible as a missing target
+#   rather than a permanently failing one.
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: polyglot-app-java
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: polyglot-shop
+spec:
+  endpoints:
+    - port: http
+      path: /actuator/prometheus
+      interval: 30s
+      scrapeTimeout: 10s
+      # Why the relabeling: it copies the component label onto every series, so a dashboard
+      # panel can select one service without knowing pod names. Without it the series carry
+      # only the generated pod name, and every panel has to regex it.
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+          targetLabel: service
+          action: replace
+  # Why the namespace selector: the application runs in retail-store while this object lives in
+  # monitoring, so the selector has to reach across namespaces.
+  namespaceSelector:
+    matchNames:
+      - retail-store
+  selector:
+    matchLabels:
+      polyglot-shop/metrics-path: actuator
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: polyglot-app-direct
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: polyglot-shop
+spec:
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s
+      scrapeTimeout: 10s
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+          targetLabel: service
+          action: replace
+  namespaceSelector:
+    matchNames:
+      - retail-store
+  selector:
+    matchLabels:
+      polyglot-shop/metrics-path: direct
+---
+# Why the collector is monitored separately: its own metrics show whether spans are being
+# dropped, queued or refused. When a trace is missing, this is what distinguishes an application
+# that never sent the span from a pipeline that lost it.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: otel-collector
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: polyglot-shop
+spec:
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+  namespaceSelector:
+    matchNames:
+      - monitoring
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: otel-collector

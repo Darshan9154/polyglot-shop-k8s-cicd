@@ -1,0 +1,15 @@
+# Non-secret configuration for ui.
+#
+# Why a ConfigMap: the values are identical across replicas and change independently
+# of the image. The Deployment carries a checksum annotation so changing this
+# triggers a rollout instead of leaving old pods running with stale settings.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ui.fullname" . }}
+  labels:
+    {{ include "ui.labels" . | nindent 4 }}
+data:
+  {{ range $key, $value := .Values.config }}
+  {{ $key }}: {{ $value | quote }}
+  {{ end }}

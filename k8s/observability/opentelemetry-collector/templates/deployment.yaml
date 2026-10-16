@@ -1,0 +1,94 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "otel.fullname" . }}
+  labels:
+    {{- include "otel.labels" . | nindent 4 }}
+spec:
+  # Why one replica: two collectors would both receive and forward every span, so traces
+  # would appear twice in Jaeger with no way to distinguish the copies. Scaling out needs
+  # a load-balancing exporter in front, which is a deliberate later step.
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "otel.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Why maxUnavailable 0: replacing the only collector means new spans are rejected
+      # until the replacement is ready, so the new pod must pass its probes first.
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "otel.labels" . | nindent 8 }}
+      annotations:
+        # Why a config checksum: without it, editing the pipeline does not change the pod
+        # template, so no rollout happens and the running collector keeps the old config
+        # until something else restarts it.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # Why a shorter grace period than the databases: the collector holds only an
+      # in-memory queue, and 30 seconds is ample to stop accepting and flush.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: otel-collector
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          # Why the subcommand is explicit: the collector image's default command runs
+          # with a bundled default config that would ignore the mounted pipeline.
+          args:
+            - "--config=/conf/config.yaml"
+          ports:
+            - name: otlp-grpc
+              containerPort: {{ (index .Values.service.ports "otlp-grpc") }}
+              protocol: TCP
+            - name: otlp-http
+              containerPort: {{ (index .Values.service.ports "otlp-http") }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.service.ports.metrics }}
+              protocol: TCP
+            - name: health
+              containerPort: {{ .Values.service.ports.health }}
+              protocol: TCP
+          # Why a readiness probe on the health extension: it returns success only after
+          # the pipelines have started, so the collector is not advertised as ready while
+          # it is still initialising.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /conf
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "otel.fullname" . }}-config
+            # Why items rather than the whole ConfigMap: mounting one named key means the
+            # file has exactly the expected name and the collector's --config path cannot
+            # silently point at the wrong file.
+            items:
+              - key: config.yaml
+                path: config.yaml

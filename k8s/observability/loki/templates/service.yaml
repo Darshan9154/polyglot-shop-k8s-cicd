@@ -1,0 +1,24 @@
+# Stable address for Loki's HTTP API.
+#
+# Why the port name is "http": Grafana's Loki data source is configured to this Service
+# and Prometheus scrapes Loki's own metrics on the same port. A renamed port would break
+# both without changing any address.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "loki.fullname" . }}
+  labels:
+    {{- include "loki.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.ports.http }}
+      targetPort: http
+      protocol: TCP
+    - name: grpc
+      port: {{ .Values.service.ports.grpc }}
+      targetPort: grpc
+      protocol: TCP
+  selector:
+    {{- include "loki.selectorLabels" . | nindent 4 }}

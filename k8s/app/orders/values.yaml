@@ -1,0 +1,192 @@
+# orders values — defaults sized for the small test cluster. Each compromise is
+# recorded next to the setting, per the project rule that a compromise must carry
+# its reason rather than being silent.
+
+# Why 1 replica: two worker nodes cannot hold more, and two nodes are not real
+# availability regardless. Raise together with podDisruptionBudget.minAvailable.
+replicaCount: 1
+
+image:
+  repository: 536882095289.dkr.ecr.eu-north-1.amazonaws.com/polyglot-shop/orders
+  # Why a tag and never ":latest": a mutable tag makes a deployment unreproducible.
+  # Pin image.digest once the pipeline records one.
+  tag: "a785cf0"
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+containerPort: 8080
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+# Why these match the Compose service definition: they are the application's own
+# configuration contract. Changing them changes behaviour, not just packaging.
+config:
+  SERVER_TOMCAT_ACCESSLOG_ENABLED: "true"
+  RETAIL_ORDERS_PERSISTENCE_PROVIDER: "postgres"
+  RETAIL_ORDERS_PERSISTENCE_ENDPOINT: "postgresql.data.svc.cluster.local:5432"
+  RETAIL_ORDERS_PERSISTENCE_NAME: "orders"
+  RETAIL_ORDERS_PERSISTENCE_USERNAME: "orders_user"
+  RETAIL_ORDERS_MESSAGING_PROVIDER: "rabbitmq"
+  RETAIL_ORDERS_MESSAGING_RABBITMQ_ADDRESSES: "rabbitmq.data.svc.cluster.local:5672"
+  RETAIL_ORDERS_MESSAGING_RABBITMQ_USERNAME: "rabbitmq"
+
+# Why secrets are referenced rather than stored: passwords arrive from the
+# polyglot-secrets Secret in the orders namespace. No credential appears in this file.
+secretEnv:
+  RETAIL_ORDERS_PERSISTENCE_PASSWORD: DB_PASSWORD
+  RETAIL_ORDERS_MESSAGING_RABBITMQ_PASSWORD: DB_PASSWORD
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+jvm:
+  # Why percentage-based heap: it follows the memory limit instead of hardcoding a
+  # heap that becomes wrong when the limit changes. Without it the JVM sizes itself
+  # from the node's total memory and ignores the container limit.
+  #
+  # Why the OpenTelemetry autoconfigure flag is here and is not optional:
+  #
+  #   These images carry the OpenTelemetry SDK, but this build has autoconfiguration disabled.
+  #   Without the flag the JVM logs
+  #
+  #     AutoConfiguredOpenTelemetrySdk found on classpath but automatic configuration is
+  #     disabled. To enable, run your JVM with
+  #     -Dotel.java.global-autoconfigure.enabled=true
+  #
+  #   and emits no traces at all. Every OTEL_* environment variable set in the Deployment is
+  #   inert without it, which is exactly the failure mode that looks like a broken collector
+  #   pipeline: Jaeger stays empty while the collector reports "Everything is ready" and the
+  #   application logs no error.
+  #
+  #   The flag is what turns the environment variables into an actual exporter.
+  javaOpts: "-XX:MaxRAMPercentage=75.0 -Dotel.java.global-autoconfigure.enabled=true -Djava.security.egd=file:/dev/urandom"
+
+probes:
+  startup:
+    # Why a startup probe: orders takes time to initialise, and without this the
+    # liveness probe would kill it mid-start and produce a restart loop.
+    enabled: true
+    path: /actuator/health
+    failureThreshold: 30
+    periodSeconds: 5
+  liveness:
+    enabled: true
+    path: /actuator/health
+    initialDelaySeconds: 20
+    periodSeconds: 15
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    # Why readiness is separate from liveness: an unready pod should leave the Service
+    # rather than be restarted. Conflating them turns a dependency outage into a
+    # restart storm.
+    enabled: true
+    path: /actuator/health
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+tmpfs:
+  # Why: the root filesystem is read-only, so the process needs a writable temporary
+  # directory. Matching the Compose tmpfs keeps the same posture.
+  enabled: true
+  sizeLimit: 128Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  # Why 1000: the images create their user with uid 1000.
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  # Why true: mirrors the Compose read_only setting; anything needing to write
+  # uses the tmpfs at /tmp below.
+  capabilities:
+    drop:
+      - ALL
+    add:
+      # Why kept from the Compose definition: it allows binding below port 1024. The
+      # service listens on 8080 and does not need it, so it is a no-op retained for
+      # parity with the tested configuration.
+      - NET_BIND_SERVICE
+
+podDisruptionBudget:
+  # Why minAvailable 0 at one replica: a budget demanding an available pod would block
+  # node drains permanently. Raise this when replicaCount is raised.
+  enabled: true
+  minAvailable: 0
+
+networkPolicy:
+  enabled: true
+  # Why only these callers: each is a service that genuinely calls it.
+  # Anything else would be lateral movement.
+  allowIngressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: retail-store
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/component: shop-ui
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: retail-store
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/component: shop-checkout
+  allowEgressTo:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: data
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: postgresql
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: data
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: rabbitmq
+      ports:
+        - protocol: TCP
+          port: 5672
+
+observability:
+  metrics:
+    enabled: true
+    port: 8080
+  tracing:
+    enabled: true
+    otlpEndpoint: "http://otel-collector.monitoring.svc.cluster.local:4317"
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+autoscaling:
+  # Why disabled: the test cluster has fixed two-node capacity, so scaling out would
+  # only create Pending pods. Configured so enabling it later is a values change.
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 75

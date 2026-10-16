@@ -1,0 +1,22 @@
+# Stable network address for the orders pods.
+#
+# Why ClusterIP: only the UI is exposed externally. Publishing an internal API with no
+# authentication of its own would widen the attack surface for no benefit.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "orders.fullname" . }}
+  labels:
+    {{ include "orders.labels" . | nindent 4 }}
+    # Why this label: it tells Prometheus which metrics path this Service serves. See the note
+    # in the chart generator; the three Java services and the two others differ.
+    polyglot-shop/metrics-path: actuator
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{ include "orders.selectorLabels" . | nindent 4 }}

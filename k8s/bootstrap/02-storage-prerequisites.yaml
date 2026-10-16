@@ -1,0 +1,43 @@
+# Default storage class expectations for the backing services.
+#
+# Why this file exists at all: on EKS the cluster ships a default StorageClass
+# (gp2 on most clusters), and it is tempting to rely on that. Relying on an
+# implicit default is how a PersistentVolumeClaim silently stays Pending for
+# twenty minutes on a cluster whose default was removed or renamed.
+#
+# The chart PersistentVolumeClaims deliberately do NOT set storageClassName, so
+# they bind to whatever the cluster marks as default. This file states the
+# requirement in one place:
+#
+#   kubectl get storageclass
+#     NAME   PROVISIONER             RECLAIMPOLICY   VOLUMEBINDINGMODE   ALLOWVOLUMEEXPANSION   AGE
+#     gp2    kubernetes.io/aws-ebs   Delete          WaitForFirstConsumer   false                ...
+#
+# Exactly one class must carry this annotation:
+#   storageclass.kubernetes.io/is-default-class: "true"
+#
+# Why gp2 rather than gp3 here: gp3 is the better volume type, but changing the
+# cluster's default is a cluster-level decision that belongs in the EKS Terraform,
+# not in an application bootstrap file. When the cluster is provisioned with gp3,
+# set storageClassName explicitly in the chart values instead.
+#
+# Nothing is applied by this file. It documents and verifies the prerequisite.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: storage-prerequisites
+  namespace: data
+  labels:
+    app.kubernetes.io/part-of: polyglot-shop
+data:
+  # Why a ConfigMap and not a comment in a README: it is discoverable with the
+  # other bootstrap objects and it records which classes the charts expect.
+  required-default-class: "true"
+  expected-provisioner: "ebs.csi.aws.com"
+  notes: |
+    The backing-service charts create PersistentVolumeClaims without a
+    storageClassName, so they require exactly one default StorageClass.
+    Verify with: kubectl get storageclass
+    A claim that stays Pending means the default is missing or uses a
+    WaitForFirstConsumer binding mode and no pod has been scheduled yet.

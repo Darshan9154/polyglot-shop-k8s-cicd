@@ -1,0 +1,23 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# Availability guarantee during voluntary disruptions.
+#
+# Why this exists at all: a node drain (an upgrade, a scale-down, an instance
+# replacement) evicts pods. Without a budget the scheduler may evict every replica at
+# once, turning routine cluster maintenance into an outage.
+#
+# Why minAvailable defaults to 0 here: with replicaCount set to 1, a budget that
+# demands one available pod can never allow a drain, and the node stays cordoned
+# forever. 0 is the honest value for a single replica; raise it when replicaCount is
+# raised. See the note in values.yaml.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cart.fullname" . }}
+  labels:
+    {{- include "cart.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "cart.selectorLabels" . | nindent 6 }}
+{{- end }}

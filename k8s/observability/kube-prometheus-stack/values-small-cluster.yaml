@@ -1,0 +1,195 @@
+# kube-prometheus-stack — metrics, dashboards and alerting.
+#
+# Why this component is configured rather than hand-written: kube-prometheus-stack is the
+# upstream project that bundles Prometheus, Alertmanager, Grafana, the Prometheus Operator
+# and a set of default rules. Writing that from scratch would mean maintaining several
+# thousand lines of alerting rules and recording rules that the community already tests
+# against new Kubernetes versions. The value of this file is the sizing and the
+# integration, not a reimplementation.
+#
+# Install:
+#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#   helm repo update
+#   helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+#     --namespace monitoring --create-namespace \
+#     --values values-small-cluster.yaml \
+#     --wait --timeout 15m
+
+# ---------------------------------------------------------------------------
+# Prometheus
+# ---------------------------------------------------------------------------
+prometheus:
+  prometheusSpec:
+    # Why a single replica and no sharding: this cluster has two worker nodes with a fixed
+    # budget. Two Prometheus replicas would double memory for no benefit at this scale.
+    replicas: 1
+
+    # Retention and storage.
+    #
+    # Why 3 days and 10Gi: retention is the direct driver of disk cost, which comes out of
+    # the same credit allowance as everything else. Three days is enough to see a trend and
+    # to compare a deployment against its predecessor, which is what the metrics are for
+    # here. A production deployment would use 15-30 days and object storage.
+    #
+    # Why retentionSize is set well below the claim rather than close to it: Prometheus deletes
+    # whole blocks once the limit is reached, but it needs working space while compacting.
+    # Setting the limit near the volume size is how Prometheus fills its disk and is then killed
+    # by the kubelet mid-compaction, which corrupts the most recent block.
+    retention: 3d
+    retentionSize: 7GB
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 10Gi
+
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        # Why 2Gi: Prometheus memory is driven by the number of active series. The scrape
+        # configuration is trimmed below specifically to keep this bounded on a small
+        # cluster; raising this limit without trimming series would only delay an OOM.
+        memory: 2Gi
+
+    # Why these selectors are set: by default Prometheus only discovers ServiceMonitors and
+    # PodMonitors that carry the release label. Setting them to empty makes it watch all
+    # namespaces, which is what allows a ServiceMonitor in the retail-store namespace to be
+    # picked up without also labelling it with the Helm release name.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    probeSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+
+    # Why external labels: they identify which cluster a series came from, so a dashboard
+    # or alert that is copied between environments cannot silently mix data from two
+    # clusters.
+    externalLabels:
+      cluster: polyglot-shop-eks
+
+    # Why the scrape configuration is trimmed: the default kube-prometheus-stack scrapes a
+    # large number of targets. On a two-node cluster that is the main driver of series
+    # count and therefore memory. Each block below disables a target set that this
+    # deployment does not need, and the reason is stated rather than assumed.
+    # Keep node and kubelet metrics: they are what shows a node running out of memory or
+    # disk, which is the most likely failure mode for a small cluster.
+    # Disable everything that monitors control-plane components not reachable from a
+    # managed EKS control plane, because the scrape would fail forever and produce
+    # permanent target-down alerts.
+
+  # Why node exporter stays enabled: it is the source of node-level CPU, memory, filesystem
+  # and network metrics. Without it there is no way to see a node at capacity, which is the
+  # single most likely cause of pods being evicted here.
+  nodeExporter:
+    enabled: true
+
+  # Why kube-state-metrics stays enabled: it turns Kubernetes objects into metrics such as
+  # deployment replicas unavailable and pod restart counts. It is the source for the alerts
+  # that would actually page someone about this application.
+  kubeStateMetrics:
+    enabled: true
+
+# ---------------------------------------------------------------------------
+# Alertmanager
+# ---------------------------------------------------------------------------
+alertmanager:
+  # Why enabled but minimal: alerts are defined in the chart's default rules and the
+  # application rules added alongside this file. Without Alertmanager those rules fire into
+  # nothing. Routing to a real destination (Slack, PagerDuty, email) needs a receiver
+  # configured with the person's endpoint, which is deliberately left unset rather than
+  # filled with a placeholder that silently swallows notifications.
+  enabled: true
+  alertmanagerSpec:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              # Why a small claim: enough to persist the notification log and silences
+              # across a restart.
+              storage: 2Gi
+
+# ---------------------------------------------------------------------------
+# Grafana
+# ---------------------------------------------------------------------------
+grafana:
+  enabled: true
+
+  # Why the admin password is not set here: it belongs in a Secret, never in a values file
+  # that is committed. Create it out of band and reference it, or let the chart generate
+  # one and read it from the Secret it creates:
+  #   kubectl -n monitoring get secret monitoring-grafana -o jsonpath='{.data.admin-password}' | base64 -d
+  #
+  # Why the datasources are declared as code: a datasource added by hand in the UI is lost
+  # when the pod restarts, and there is then no record of how the stack was wired. Declaring
+  # them here makes the wiring reviewable and reproducible.
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      access: proxy
+      url: http://loki.monitoring.svc.cluster.local:3100
+      jsonData:
+        # Why this derived field: it makes a trace ID inside a log line a clickable link
+        # straight into Jaeger. This is the single most useful piece of the whole
+        # observability setup — it turns "which request failed" into "here is that request's
+        # trace" without copying an ID between tools.
+        derivedFields:
+          - datasourceUid: jaeger
+            matcherRegex: "trace_id=(\\w+)"
+            name: TraceID
+            url: "$${__value.raw}"
+    - name: Jaeger
+      type: jaeger
+      access: proxy
+      url: http://jaeger.monitoring.svc.cluster.local:16686
+      # Why a fixed uid: the Loki derived field above references it. An auto-generated uid
+      # would break the log-to-trace link on the next reload.
+      uid: jaeger
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 512Mi
+
+  # Why a single replica with no persistence: dashboards are provisioned from ConfigMaps
+  # and the datasources from this file, so there is no dashboard state to lose. This avoids
+  # a PersistentVolumeClaim that would only hold a Grafana SQLite file.
+  persistence:
+    enabled: false
+
+# ---------------------------------------------------------------------------
+# Component toggles
+# ---------------------------------------------------------------------------
+# Why these are disabled: each one is an additional workload with its own memory
+# footprint, and none of them is needed for the application metrics this deployment
+# collects. Disabling them is a sizing decision, recorded rather than assumed.
+#
+# kubeProxy: EKS manages the proxy; scraping it produces permanently failing targets.
+kubeProxy:
+  enabled: false
+
+# kubeEtcd, kubeScheduler, kubeControllerManager: on a managed EKS control plane these
+# endpoints are not exposed to the cluster, so the default scrapes fail forever and
+# generate constant TargetDown alerts that would mask real ones.
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeControllerManager:
+  enabled: false

@@ -1,0 +1,60 @@
+{{/*
+Two Services, on purpose.
+
+The headless Service (clusterIP: None) gives the StatefulSet its stable per-pod DNS
+name and is what `serviceName` refers to. The regular ClusterIP Service gives clients
+a single address, which is what the application charts connect to at
+dynamodb-local.data.svc.cluster.local. Collapsing these into one would either break the
+StatefulSet's identity or make clients resolve every pod individually.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dynamodb-local.headless" . }}
+  labels:
+    {{ include "dynamodb-local.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  ports:
+    - name: dynamodb
+      port: 8000
+      targetPort: dynamodb
+      protocol: TCP
+  selector:
+    {{ include "dynamodb-local.selectorLabels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dynamodb-local.fullname" . }}
+  labels:
+    {{ include "dynamodb-local.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: dynamodb
+      port: 8000
+      targetPort: dynamodb
+      protocol: TCP
+  selector:
+    {{ include "dynamodb-local.selectorLabels" . | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dynamodb
+  labels:
+    {{ include "dynamodb-local.labels" . | nindent 4 }}
+  annotations:
+    # Why an annotation: it records that this Service is an alias and not the primary address,
+    # so a future reader does not "fix" the duplication by deleting one of the two.
+    polyglot-shop/alias-for: {{ include "dynamodb-local.fullname" . }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: dynamodb
+      port: 8000
+      targetPort: dynamodb
+      protocol: TCP
+  selector:
+    {{ include "dynamodb-local.selectorLabels" . | nindent 4 }}

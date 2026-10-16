@@ -1,0 +1,22 @@
+# mariadb — MariaDB 10.9 — the catalog service's product database.
+#
+# Why this is a separate chart from the application: it holds state, has different
+# backup and upgrade requirements, and in a production environment would most likely
+# be a managed service. Keeping it separate means the application chart can be pointed
+# at a managed endpoint without changing any workload definition.
+apiVersion: v2
+name: mariadb
+description: |
+  MariaDB 10.9 — the catalog service's product database.
+
+  Deployed in-cluster for the test environment to avoid managed-service hourly costs.
+  The application charts accept a host and port, so moving to RDS/ElastiCache/Amazon MQ
+  is a values change rather than a rewrite.
+type: application
+version: 0.1.0
+appVersion: "10.9"
+keywords:
+  - retail
+  - data
+annotations:
+  category: Infrastructure

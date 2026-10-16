@@ -1,0 +1,27 @@
+# Stable network address for the cart pods.
+#
+# Why ClusterIP and not NodePort or LoadBalancer: the cart API is called by the UI
+# service inside the cluster. Publishing it externally would expose an internal API
+# with no authentication of its own. Only the UI is reachable from outside, and it
+# is the component that should be.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cart.fullname" . }}
+  labels:
+    {{- include "cart.labels" . | nindent 4 }}
+    # Why this label: it tells Prometheus which metrics path this Service serves. cart is a
+    # Spring Boot service and exposes metrics at /actuator/prometheus, the Java convention. The
+    # ServiceMonitor for the Java services selects on this value. Without it this Service would
+    # match neither ServiceMonitor and simply would not be scraped — visible as a missing target
+    # rather than a failing one, which is the quieter and more dangerous of the two.
+    polyglot-shop/metrics-path: actuator
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "cart.selectorLabels" . | nindent 4 }}

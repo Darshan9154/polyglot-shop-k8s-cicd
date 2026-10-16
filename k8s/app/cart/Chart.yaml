@@ -1,0 +1,20 @@
+# cart — shopping cart API (Java / Spring Boot), backed by DynamoDB.
+apiVersion: v2
+name: cart
+description: |
+  Shopping cart API. Stores cart contents in DynamoDB; in this cluster it points at
+  the in-cluster DynamoDB Local instance, mirroring the Compose deployment.
+type: application
+# Why these two versions: appVersion tracks the image build (the git SHA), while
+# version tracks this chart. Keeping them distinct means a configuration change
+# bumps one without implying the application code changed.
+version: 0.1.0
+appVersion: "a785cf0"
+keywords:
+  - retail
+  - cart
+  - java
+maintainers:
+  - name: platform
+annotations:
+  category: Application

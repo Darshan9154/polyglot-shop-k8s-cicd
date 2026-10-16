@@ -1,0 +1,44 @@
+# umbrella — installs all five application services in a single release.
+#
+# Why this exists: the five services are deployed together and versioned together, so a
+# single `helm upgrade` is more convenient than five. It is a convenience, not a
+# requirement — each service chart installs correctly on its own.
+#
+# Why the dependencies are declared with file:// paths rather than a chart repository:
+# this is one project's deployment, not a published platform. Pointing at a local path
+# means a change to a service chart is picked up on the next `helm dependency update`
+# with no publishing step to forget.
+#
+# Why there is no template content of its own: the umbrella intentionally deploys
+# nothing. Everything it installs comes from its subcharts, so there is one place per
+# component that defines the workload. A template here duplicating a subchart would be
+# the start of drift.
+apiVersion: v2
+name: umbrella
+description: |
+  Installs the five Polyglot Shop application services (cart, catalog, checkout, orders,
+  ui) as a single Helm release. The backing services are managed separately under
+  k8s/infra because they have a different lifecycle and hold state.
+type: application
+version: 0.1.0
+appVersion: "a785cf0"
+
+dependencies:
+  # Why each dependency is listed even though they are all local: Helm needs the list to
+  # build the lock file and to resolve ordering. Without it, `helm dependency build`
+  # installs nothing and the release silently contains no workloads.
+  - name: cart
+    version: 0.1.0
+    repository: "file://../cart"
+  - name: catalog
+    version: 0.1.0
+    repository: "file://../catalog"
+  - name: checkout
+    version: 0.1.0
+    repository: "file://../checkout"
+  - name: orders
+    version: 0.1.0
+    repository: "file://../orders"
+  - name: ui
+    version: 0.1.0
+    repository: "file://../ui"

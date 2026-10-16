@@ -1,0 +1,26 @@
+﻿# Line-ending normalisation.
+
+# Why this matters for this repository: the Kubernetes charts, the workflow files and the shell
+# scripts are all consumed on Linux — by Helm, by GitHub Actions runners, and by the build
+# server. A shell script checked out with CRLF endings fails on Linux with
+# "/bin/bash^M: bad interpreter", which is a confusing error for what is really a line-ending
+# problem. Declaring the expected endings here means the repository is correct regardless of
+# which machine checked it out.
+
+* text=auto eol=lf
+
+# Windows-only scripts genuinely want CRLF.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files must not be normalised at all.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.jar binary
+*.gz binary
+*.zip binary
+*.tgz binary

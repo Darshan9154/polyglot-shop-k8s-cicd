@@ -1,0 +1,102 @@
+# Ingress for the storefront, served by an internet-facing Application Load Balancer.
+#
+# Why an Ingress and not a Service of type LoadBalancer:
+#
+#   A Service of type LoadBalancer on this cluster would be served by the deprecated in-tree
+#   cloud provider, which provisions a Classic Load Balancer. The Ingress route uses the AWS
+#   Load Balancer Controller installed in this cluster, which provisions an ALB with proper
+#   target groups, health checks and path routing. It is the supported path, and it is what
+#   lets a second service be added later without a second load balancer.
+#
+# Why only the UI is exposed:
+#
+#   The UI is the only component intended to face the internet. It aggregates catalog, cart,
+#   orders and checkout internally over ClusterIP Services. Publishing those four would expose
+#   internal APIs that have their own authentication model but no edge protection — the cart API
+#   would accept any request that reaches it.
+#
+#   If the catalog API does need to be reachable for testing, add a second Ingress with the same
+#   `alb.ingress.kubernetes.io/group.name` annotation and it will share this same load balancer
+#   rather than provisioning another one.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop-ui
+  namespace: retail-store
+  labels:
+    app.kubernetes.io/part-of: polyglot-shop
+    app.kubernetes.io/component: shop-ui
+  annotations:
+    # Why "alb": it selects the IngressClass the AWS Load Balancer Controller created. Without
+    # this the Ingress is accepted by the API server and then ignored by every controller, and
+    # the only symptom is that no load balancer ever appears.
+    alb.ingress.kubernetes.io/scheme: internet-facing
+
+    # Why "ip" and not "instance": with ip targets the load balancer sends traffic directly to
+    # pod addresses. With instance targets it sends to the node's NodePort, which adds a hop and
+    # requires the target group to be registered against node instances. For a ClusterIP Service
+    # the controller requires ip mode for this to work as expected.
+    alb.ingress.kubernetes.io/target-type: ip
+
+    # Why 80 only: the deployment has no domain name and therefore no certificate. An HTTPS
+    # listener needs an ACM certificate to attach, and creating one requires a domain that
+    # resolves to this load balancer. Adding TLS later is a matter of requesting the certificate
+    # and adding a listener annotation — no change to this routing.
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+
+    # Why a custom health check path: the ALB's default is "/", which now returns 200 here, but
+    # the application's own health endpoint is the correct signal. "/" exercises the whole page
+    # render, including the catalog call, so a healthy pod could be marked unhealthy by a slow
+    # database — or an unhealthy one marked healthy because the shell of the page still rendered.
+    alb.ingress.kubernetes.io/healthcheck-path: /actuator/health
+
+    # Why these intervals: the ALB defaults of a 30-second interval mean a newly started pod can
+    # wait up to a minute before receiving traffic. These values detect a recovered pod in about
+    # 20 seconds.
+    #
+    # Why timeout is strictly smaller than interval: ELB validates that the health check timeout
+    # is less than the interval, and rejects the target group otherwise:
+    #
+    #   ValidationError: Health check timeout '10' must be smaller than the interval '5'
+    #
+    # The first version of this file set a 10-second interval with a 10-second timeout, which the
+    # controller retried indefinitely — no load balancer was created, the Ingress had no address,
+    # and the only evidence was this message in the controller's log. 10 and 5 leave a 5-second
+    # margin for the JVM health endpoint, which is slower on its first call after a cold start.
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "10"
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "5"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "3"
+
+    # Why success codes are explicit: the health endpoint returns 200 when healthy and 503 when
+    # not. Listing 200 only means a 503 correctly marks the target unhealthy rather than being
+    # accepted as a response.
+    alb.ingress.kubernetes.io/success-codes: "200"
+
+    # Why a group name: it names the shared load balancer. Ingresses that share a group share one
+    # ALB, which is what keeps this to a single load balancer if a second path is added later.
+    alb.ingress.kubernetes.io/group.name: polyglot-shop
+
+spec:
+  # Why the class is named explicitly: the cluster has exactly one IngressClass today, so it
+  # would be selected by default. Naming it means the behaviour does not change if another
+  # controller is installed later and becomes the default.
+  ingressClassName: alb
+  rules:
+    # Why no host: host-based routing needs a domain name. Without one, the load balancer's own
+    # DNS name is the entry point and a single catch-all rule is what serves it. Add a host here
+    # once a domain resolves to the load balancer.
+    - http:
+        paths:
+          - path: /
+            # Why Prefix: the UI serves many paths — the storefront, the cart, the checkout flow
+            # — and all of them belong to this service. Exact would serve only "/".
+            pathType: Prefix
+            backend:
+              service:
+                name: shop-ui
+                port:
+                  # Why the port is the Service's port and not the container's: the Service
+                  # listens on 80 and targets 8080. Naming the Service port here keeps this
+                  # consistent with how other in-cluster callers reach it.
+                  number: 80

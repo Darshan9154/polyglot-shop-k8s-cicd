@@ -1,0 +1,74 @@
+# Default deny NetworkPolicies, applied per namespace.
+#
+# Why these come before the application: a policy is only meaningful if traffic is
+# denied by default. Starting from "allow everything" and adding restrictions
+# leaves every path nobody thought about wide open. These two policies make the
+# default deny, and the per-service charts then open exactly the flows they need.
+#
+# Why this matters more than usual here: without a NetworkPolicy, any compromised
+# pod can reach MariaDB, PostgreSQL, Redis and RabbitMQ directly. The application
+# NetworkPolicies in the app charts are written to complement these.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: retail-store
+  labels:
+    app.kubernetes.io/part-of: polyglot-shop
+spec:
+  # Why an empty podSelector: it selects every pod in the namespace, so this is the
+  # namespace-wide default.
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: data
+  labels:
+    app.kubernetes.io/part-of: polyglot-shop
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: polyglot-shop
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# Why a separate DNS policy: with ingress denied by default, pods also lose the
+# ability to answer DNS queries unless it is allowed explicitly. This is the
+# single most common cause of "the app hangs on startup" after adding a default
+# deny, so it is provided here rather than left to each chart.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: retail-store
+  labels:
+    app.kubernetes.io/part-of: polyglot-shop
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

@@ -1,0 +1,77 @@
+# Stable addresses for the collector's four ports.
+#
+# Why the port names matter here: the application charts reference this Service by name
+# for OTLP, and Prometheus service discovery matches on the port name for scraping. A
+# renamed port would silently stop metrics collection even though the Service still
+# resolves.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "otel.fullname" . }}
+  labels:
+    {{- include "otel.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: otlp-grpc
+      port: {{ (index .Values.service.ports "otlp-grpc") }}
+      targetPort: otlp-grpc
+      protocol: TCP
+    - name: otlp-http
+      port: {{ (index .Values.service.ports "otlp-http") }}
+      targetPort: otlp-http
+      protocol: TCP
+    # Why the metrics port is exposed on the Service: Prometheus scrapes the collector
+    # itself for its own dropped/queued span counters, which is how a failing pipeline is
+    # detected rather than guessed at.
+    - name: metrics
+      port: {{ .Values.service.ports.metrics }}
+      targetPort: metrics
+      protocol: TCP
+    - name: health
+      port: {{ .Values.service.ports.health }}
+      targetPort: health
+      protocol: TCP
+  selector:
+    {{- include "otel.selectorLabels" . | nindent 4 }}
+{{- if .Values.serviceAlias }}
+---
+{{/*
+Alias Service.
+
+Why this exists: the application charts point their OTLP exporter at
+"otel-collector.monitoring.svc.cluster.local:4317", but the Helm fullname helper names this
+Service "otel-collector-opentelemetry-collector" after the release and the chart. That name does
+not resolve, so every span the applications emit is dropped on a name-resolution error and Jaeger
+stays empty — while the collector itself reports "Everything is ready" and looks perfectly
+healthy. A destination that cannot be resolved is a retry, not a startup failure, so nothing in
+the collector's own logs shows the problem.
+
+Rather than rename the application's endpoint or the chart, the Service the applications expect
+is provided as an alias. The same pattern is used for the DynamoDB Local service, for the same
+reason.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.serviceAlias }}
+  labels:
+    {{- include "otel.labels" . | nindent 4 }}
+  annotations:
+    # Why an annotation: it records that this Service is an alias rather than the primary
+    # address, so a later reader does not "tidy up" the duplication by deleting one of the two.
+    polyglot-shop/alias-for: {{ include "otel.fullname" . }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: otlp-grpc
+      port: {{ (index .Values.service.ports "otlp-grpc") }}
+      targetPort: otlp-grpc
+      protocol: TCP
+    - name: otlp-http
+      port: {{ (index .Values.service.ports "otlp-http") }}
+      targetPort: otlp-http
+      protocol: TCP
+  selector:
+    {{- include "otel.selectorLabels" . | nindent 4 }}
+{{- end }}

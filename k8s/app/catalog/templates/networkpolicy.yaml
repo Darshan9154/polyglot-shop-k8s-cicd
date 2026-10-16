@@ -1,0 +1,56 @@
+{{- if .Values.networkPolicy.enabled }}
+# Traffic rules for catalog.
+#
+# Why required and not optional: the bootstrap layer applies default-deny per
+# namespace, so without this policy the pods receive nothing and the readiness probe
+# fails. It is part of making the service function, not extra hardening.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "catalog.fullname" . }}
+  labels:
+    {{ include "catalog.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{ include "catalog.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    {{ if eq (len .Values.networkPolicy.allowIngressFrom) 0 }}
+    # Why an empty ingress rule: this service is reached from outside the cluster, so
+    # no in-cluster source can be named. Traffic is still restricted to the port.
+    - ports:
+        - protocol: TCP
+          port: {{ $.Values.containerPort }}
+    {{ else }}
+    - from:
+        {{ toYaml .Values.networkPolicy.allowIngressFrom | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ $.Values.containerPort }}
+    {{ end }}
+  egress:
+    # Why `to` and `ports` are siblings here: `to` selects the peer, `ports` restricts
+    # the rule. Nesting `ports` inside a `to` entry makes the NetworkPolicy invalid and
+    # kubeconform rejects it, so the two are emitted as parallel blocks.
+    {{- range .Values.networkPolicy.allowEgressTo }}
+    - to:
+        {{ toYaml .to | nindent 8 }}
+      {{- with .ports }}
+      ports:
+        {{ toYaml . | nindent 8 }}
+      {{- end }}
+    {{- end }}
+    # DNS is required by every service.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}

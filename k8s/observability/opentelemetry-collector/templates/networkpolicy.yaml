@@ -1,0 +1,65 @@
+﻿{{- if .Values.networkPolicy.enabled }}
+# Traffic rules for the collector.
+#
+# Why this component needs a policy more than most: it accepts span payloads, which is
+# untrusted input from the network. Restricting who may send is what stops anything
+# outside the application namespace from injecting spans or flooding the queue.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "otel.fullname" . }}
+  labels:
+    {{- include "otel.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "otel.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Why `from` and `ports` are siblings: `ports` belongs to the rule. Nesting it inside
+    # a peer entry produces an invalid NetworkPolicy.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.allowIngressFromNamespace }}
+        # Why the monitoring namespace is also allowed: Prometheus scrapes the collector's
+        # own metrics port from here. Without this rule the scrape is silently blocked and
+        # the collector's drop counters are invisible.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: {{ (index .Values.service.ports "otlp-grpc") }}
+        - protocol: TCP
+          port: {{ (index .Values.service.ports "otlp-http") }}
+        - protocol: TCP
+          port: {{ .Values.service.ports.metrics }}
+  egress:
+    {{- if .Values.networkPolicy.allowEgressToJaeger }}
+    # Why the destination is narrowed to Jaeger: the collector processes application
+    # payloads, so an unrestricted egress path would make it a route for data to leave
+    # the cluster.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: jaeger
+      ports:
+        - protocol: TCP
+          port: 4317
+    {{- end }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end }}

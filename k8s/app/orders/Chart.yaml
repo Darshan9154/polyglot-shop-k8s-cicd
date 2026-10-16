@@ -1,0 +1,13 @@
+# orders — Orders API (Java / Spring Boot), backed by PostgreSQL and RabbitMQ.
+apiVersion: v2
+name: orders
+description: |
+  Orders API (Java / Spring Boot), backed by PostgreSQL and RabbitMQ.
+type: application
+version: 0.1.0
+appVersion: "a785cf0"
+keywords:
+  - retail
+  - orders
+annotations:
+  category: Application
