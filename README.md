@@ -1,233 +1,99 @@
-﻿<!--
-  Orientation note added by the DevOps work. It sits at the very top because a newcomer's first
-  question is "which parts of this repository are the sample application, and which were added to
-  deploy it?" Without this, the answer requires reading the whole tree.
--->
+# Polyglot Shop — Kubernetes deployment and CI/CD
 
-## Repository layout — read this first
+A retail store application deployed to Amazon EKS, with a Helm chart per service, Terraform for
+the infrastructure, a CI/CD pipeline, and an observability stack. Everything needed to build it
+from nothing is in this repository.
 
-This repository has **two parts**, and the boundary is a directory listing:
+> **This repository is based on the AWS Containers Retail Sample** (`aws-containers/retail-store-sample-app`).
+> The application source in `src/` is that project. The `platform/` directory and the two CI/CD
+> workflows are the deployment built around it. The sample's own Terraform examples, docs and
+> pipeline files have been removed: they are not used by this deployment, and leaving them in place
+> made it impossible to tell which parts were which.
 
-| Path | What it is | Origin |
+## Layout
+
+```
+platform/               The deployment — start here
+├── bootstrap/          Cluster-level objects, applied once with kubectl
+├── charts/             Helm charts
+│   ├── app/            The five services + umbrella
+│   ├── infra/          mariadb, postgresql, redis, rabbitmq, dynamodb-local
+│   ├── observability/  Prometheus config, OpenTelemetry collector, Jaeger, Loki
+│   └── tools/          Chart generators and validators
+├── terraform/
+│   ├── eks/            The cluster, node group, IAM, IRSA roles
+│   └── build-server/   The machine that hosts the CI runner
+├── scripts/            Operational scripts
+└── docs/               Step-by-step build records, including every failure
+
+src/                    The application source (cart, catalog, checkout, orders, ui)
+deployment-me/          A Docker Compose deployment of the same application
+.github/workflows/      build-and-push-ecr.yml and deploy-eks.yml
+```
+
+**Read [`platform/README.md`](./platform/README.md) next.** It covers what each component is for,
+the install order, and the compromises made for a test cluster.
+
+## The five services
+
+| Service | Language | Backing service |
 |---|---|---|
-| **`platform/`** | The deployment: Helm charts, Terraform, CI/CD, runbooks | **Added** |
-| `src/` | The application source: cart, catalog, checkout, orders, ui | Given |
-| `deployment-me/` | A Docker Compose deployment of the application | Given |
-| `docs/`, `scripts/`, `terraform/` | The sample application's own docs, scripts and examples | Given |
-| `.github/workflows/` | Two of the eight workflows are the CI/CD pipeline | Mixed |
+| `ui` | Java / Spring Boot | — (aggregates the other four) |
+| `catalog` | Go / Gin | MariaDB |
+| `cart` | Java / Spring Boot | DynamoDB Local |
+| `orders` | Java / Spring Boot | PostgreSQL + RabbitMQ |
+| `checkout` | Node.js / NestJS | Redis |
 
-**Start with [`platform/README.md`](./platform/README.md).** It explains what exists, the install
-order, and which parts are production-grade versus deliberately sized down for a test cluster.
+## CI/CD
 
-### Inside `platform/`
-
-```
-platform/
-├── bootstrap/        Cluster-level objects applied once (namespaces, secrets, storage class)
-├── charts/           Helm charts
-│   ├── app/          The five services + umbrella
-│   ├── infra/        mariadb, postgresql, redis, rabbitmq, dynamodb-local
-│   ├── observability/ Prometheus stack config, OpenTelemetry, Jaeger, Loki
-│   └── tools/        Chart generators and validators
-├── terraform/        eks/ (the cluster) and build-server/ (the CI runner's host)
-├── scripts/          Operational scripts
-└── docs/             Step-by-step records, including every failure encountered
-```
-
-### The two workflows that are ours
-
-| Workflow | Purpose |
+| Workflow | What it does |
 |---|---|
-| `.github/workflows/build-and-push-ecr.yml` | Builds each service image, scans it, pushes to ECR |
-| `.github/workflows/deploy-eks.yml` | Renders the charts and deploys to the EKS cluster |
+| `build-and-push-ecr.yml` | Builds each service image, scans it with Trivy, pushes to ECR tagged with the commit SHA |
+| `deploy-eks.yml` | Renders the charts, then `helm upgrade`s the cluster with automatic rollback on failure |
 
-Both run on a **self-hosted runner** hosted on the build server. That is not a preference: from
-inside the VPC the EKS API endpoint resolves to its private address, and the cluster's security
-group allows port 443 only from that machine. **No AWS credential is stored in this repository** —
-the runner uses the instance profile.
+Both run on a **self-hosted runner on the build server**. That is a requirement rather than a
+preference: from inside the VPC the EKS API endpoint resolves to its private address, and the
+cluster's security group allows port 443 only from that machine. **No AWS credential is stored in
+this repository** — the runner uses the instance's IAM role.
 
-The other six workflows under `.github/workflows/` belong to the sample application. Note that
-`Release` and `E2E Test` fail on `main`, including on the original commit — that is pre-existing
-and unrelated to the platform.
+## Rebuilding from scratch
 
----
-![Banner](./docs/images/banner.png)
+The order matters; each step depends on the one before it.
 
-<div align="center">
-  <div align="center">
+```bash
+# 1. Infrastructure — the build server, then the cluster
+cd platform/terraform/build-server && terraform init && terraform apply
+cd ../eks                           && terraform init && terraform apply
 
-[![Stars](https://img.shields.io/github/stars/aws-containers/retail-store-sample-app)](Stars)
-![GitHub License](https://img.shields.io/github/license/aws-containers/retail-store-sample-app?color=green)
-![Dynamic JSON Badge](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Faws-containers%2Fretail-store-sample-app%2Frefs%2Fheads%2Fmain%2F.release-please-manifest.json&query=%24%5B%22.%22%5D&label=release)
-![GitHub Release Date](https://img.shields.io/github/release-date/aws-containers/retail-store-sample-app)
+# 2. Cluster-level objects
+kubectl apply -f platform/bootstrap/
 
-  </div>
+# 3. Backing services, then the application
+for c in mariadb postgresql redis rabbitmq dynamodb-local; do
+  helm upgrade --install "$c" "platform/charts/infra/$c" -n data --wait
+done
+helm upgrade --install shop platform/charts/app/umbrella -n retail-store --wait
 
-  <strong>
-  <h2>AWS Containers Retail Sample</h2>
-  </strong>
-</div>
-
-This is a sample application designed to illustrate various concepts related to containers on AWS. It presents a sample retail store application including a product catalog, shopping cart and checkout.
-
-It provides:
-
-- A demo store-front application with themes, pages to show container and application topology information, generative AI chat bot and utility functions for experimentation and demos.
-- An optional distributed component architecture using various languages and frameworks
-- A variety of different persistence backends for the various components like MariaDB (or MySQL), DynamoDB and Redis
-- The ability to run in different container orchestration technologies like Docker Compose, Kubernetes etc.
-- Pre-built container images for both x86-64 and ARM64 CPU architectures
-- All components instrumented for Prometheus metrics and OpenTelemetry OTLP tracing
-- Support for Istio on Kubernetes
-- Load generator which exercises all of the infrastructure
-
-See the [features documentation](./docs/features.md) for more information.
-
-**This project is intended for educational purposes only and not for production use**
-
-![Screenshot](/docs/images/screenshot.png)
-
-## Application Architecture
-
-The application has been deliberately over-engineered to generate multiple de-coupled components. These components generally have different infrastructure dependencies, and may support multiple "backends" (example: Carts service supports MongoDB or DynamoDB).
-
-![Architecture](/docs/images/architecture.png)
-
-| Component                  | Language | Container Image                                                             | Helm Chart                                                                        | Description                             |
-| -------------------------- | -------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | --------------------------------------- |
-| [UI](./src/ui/)            | Java     | [Link](https://gallery.ecr.aws/aws-containers/retail-store-sample-ui)       | [Link](https://gallery.ecr.aws/aws-containers/retail-store-sample-ui-chart)       | Store user interface                    |
-| [Catalog](./src/catalog/)  | Go       | [Link](https://gallery.ecr.aws/aws-containers/retail-store-sample-catalog)  | [Link](https://gallery.ecr.aws/aws-containers/retail-store-sample-catalog-chart)  | Product catalog API                     |
-| [Cart](./src/cart/)        | Java     | [Link](https://gallery.ecr.aws/aws-containers/retail-store-sample-cart)     | [Link](https://gallery.ecr.aws/aws-containers/retail-store-sample-cart-chart)     | User shopping carts API                 |
-| [Orders](./src/orders)     | Java     | [Link](https://gallery.ecr.aws/aws-containers/retail-store-sample-orders)   | [Link](https://gallery.ecr.aws/aws-containers/retail-store-sample-orders-chart)   | User orders API                         |
-| [Checkout](./src/checkout) | Node     | [Link](https://gallery.ecr.aws/aws-containers/retail-store-sample-checkout) | [Link](https://gallery.ecr.aws/aws-containers/retail-store-sample-checkout-chart) | API to orchestrate the checkout process |
-
-## Quickstart
-
-The following sections provide quickstart instructions for various platforms.
-
-### Docker
-
-This deployment method will run the application as a single container on your local machine using `docker`.
-
-Pre-requisites:
-
-- Docker installed locally
-
-Run the container:
-
-```
-docker run -it --rm -p 8888:8080 public.ecr.aws/aws-containers/retail-store-sample-ui:1.0.0
+# 4. Observability
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm upgrade --install monitoring prometheus-community/kube-prometheus-stack \
+  -n monitoring -f platform/charts/observability/kube-prometheus-stack/values-small-cluster.yaml
 ```
 
-Open the frontend in a browser window:
+Images are built by the pipeline. To build and push by hand, use
+`platform/scripts/push-images-ecr.sh`.
 
-```
-http://localhost:8888
-```
+## Conventions
 
-To stop the container in `docker` use Ctrl+C.
+- **Images pinned by tag or digest.** A tag can be moved; a digest cannot.
+- **Resource requests and limits on every container.** Requests are what the scheduler reserves.
+- **Security context on every workload**: non-root, no privilege escalation, capabilities dropped,
+  seccomp. The application and its databases run under the `restricted` Pod Security Standard.
+- **Secrets never in values files** — they come from Kubernetes Secrets created out of band.
+- **Every compromise is labelled where it appears**, with the reason and the production
+  alternative. Nothing is sized down silently.
 
-### Docker Compose
+## Licence
 
-This deployment method will run the application on your local machine using `docker-compose`.
-
-Pre-requisites:
-
-- Docker installed locally
-
-Download the latest Docker Compose file and use `docker compose` to run the application containers:
-
-```
-wget https://github.com/aws-containers/retail-store-sample-app/releases/latest/download/docker-compose.yaml
-
-DB_PASSWORD='<some password>' docker compose --file docker-compose.yaml up
-```
-
-Open the frontend in a browser window:
-
-```
-http://localhost:8888
-```
-
-To stop the containers in `docker compose` use Ctrl+C. To delete all the containers and related resources run:
-
-```
-docker compose -f docker-compose.yaml down
-```
-
-### Kubernetes
-
-This deployment method will run the application in an existing Kubernetes cluster.
-
-Pre-requisites:
-
-- Kubernetes cluster
-- `kubectl` installed locally
-
-Use `kubectl` to run the application:
-
-```
-kubectl apply -f https://github.com/aws-containers/retail-store-sample-app/releases/latest/download/kubernetes.yaml
-kubectl wait --for=condition=available deployments --all
-```
-
-Get the URL for the frontend load balancer like so:
-
-```
-kubectl get svc ui
-```
-
-To remove the application use `kubectl` again:
-
-```
-kubectl delete -f https://github.com/aws-containers/retail-store-sample-app/releases/latest/download/kubernetes.yaml
-```
-
-### Terraform
-
-The following options are available to deploy the application using Terraform:
-
-| Name                                             | Description                                                                                                     |
-| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| [Amazon EKS](./terraform/eks/default/)           | Deploys the application to Amazon EKS using other AWS services for dependencies, such as RDS, DynamoDB etc.     |
-| [Amazon EKS (Minimal)](./terraform/eks/minimal/) | Deploys the application to Amazon EKS using in-cluster dependencies instead of RDS, DynamoDB etc.               |
-| [Amazon ECS](./terraform/ecs/default/)           | Deploys the application to Amazon ECS using other AWS services for dependencies, such as RDS, DynamoDB etc.     |
-| [AWS App Runner](./terraform/apprunner/)         | Deploys the application to AWS App Runner using other AWS services for dependencies, such as RDS, DynamoDB etc. |
-
-## Security
-
-See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
-
-## License
-
-This project is licensed under the MIT-0 License.
-
-This package depends on and may incorporate or retrieve a number of third-party
-software packages (such as open source packages) at install-time or build-time
-or run-time ("External Dependencies"). The External Dependencies are subject to
-license terms that you must accept in order to use this package. If you do not
-accept all of the applicable license terms, you should not use this package. We
-recommend that you consult your companyâ€™s open source approval policy before
-proceeding.
-
-Provided below is a list of External Dependencies and the applicable license
-identification as indicated by the documentation associated with the External
-Dependencies as of Amazon's most recent review.
-
-THIS INFORMATION IS PROVIDED FOR CONVENIENCE ONLY. AMAZON DOES NOT PROMISE THAT
-THE LIST OR THE APPLICABLE TERMS AND CONDITIONS ARE COMPLETE, ACCURATE, OR
-UP-TO-DATE, AND AMAZON WILL HAVE NO LIABILITY FOR ANY INACCURACIES. YOU SHOULD
-CONSULT THE DOWNLOAD SITES FOR THE EXTERNAL DEPENDENCIES FOR THE MOST COMPLETE
-AND UP-TO-DATE LICENSING INFORMATION.
-
-YOUR USE OF THE EXTERNAL DEPENDENCIES IS AT YOUR SOLE RISK. IN NO EVENT WILL
-AMAZON BE LIABLE FOR ANY DAMAGES, INCLUDING WITHOUT LIMITATION ANY DIRECT,
-INDIRECT, CONSEQUENTIAL, SPECIAL, INCIDENTAL, OR PUNITIVE DAMAGES (INCLUDING
-FOR ANY LOSS OF GOODWILL, BUSINESS INTERRUPTION, LOST PROFITS OR DATA, OR
-COMPUTER FAILURE OR MALFUNCTION) ARISING FROM OR RELATING TO THE EXTERNAL
-DEPENDENCIES, HOWEVER CAUSED AND REGARDLESS OF THE THEORY OF LIABILITY, EVEN
-IF AMAZON HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES. THESE LIMITATIONS
-AND DISCLAIMERS APPLY EXCEPT TO THE EXTENT PROHIBITED BY APPLICABLE LAW.
-
-MariaDB Community License - [LICENSE](https://mariadb.com/kb/en/mariadb-licenses/)
-MySQL Community Edition - [LICENSE](https://github.com/mysql/mysql-server/blob/8.0/LICENSE)
+The application source is the AWS Containers Retail Sample. See `LICENSE` and the `ATTRIBUTION.md`
+files under `src/`.

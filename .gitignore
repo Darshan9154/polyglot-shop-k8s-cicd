@@ -35,3 +35,6 @@ devenv.local.nix
 # least one case, a runner registration token. Never commit them.
 .ssm-params.json
 *ssm-params*.json
+
+# Local AWS CLI installer downloaded during early setup. 59 MB, never needed in git.
+awscliv2.zip
